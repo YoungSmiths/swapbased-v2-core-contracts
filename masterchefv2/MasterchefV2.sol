@@ -87,18 +87,32 @@ interface ISingleStaking {
 
 /* MADE BY KELL */
 
+/**
+ * @title MasterchefV2
+ * @notice 流动性挖矿「调度中心」：仅允许已注册的 Farm（StakingRewards）调用 mintRewards 铸奖励；
+ *         按池分配全局每秒产出（allocPoint）与社区投票份额（allocPointCommunity），并驱动各池 rewardRate。
+ * @dev 奖励代币通过 IBaseToken.mint 发放；ratios 为万分比，与 rewards 数组一一对应。
+ */
 contract MasterchefV2 is Ownable {
     using SafeMath for uint256;
     // immutables
+    /// @notice 治理代币地址，用于计算投票权（钱包余额 + 可选单币质押）
     address public xBASE;
+    /// @notice 到达该时间戳后才允许 mintRewards（全局挖矿开启时间）
     uint public stakingRewardsGenesis;
+    /// @notice 全部池子「基础分配」权重之和，与 globalSkullPerSecond 共同决定每池每秒基础产出
     uint public totalAllocPoint;
+    /// @notice 全部池子「社区投票」权重之和，与 globalCommunitySkullPerSecond 共同决定每池每秒社区加成
     uint public totalAllocPointCommunity;
 
+    /// @notice 是否为已注册 Farm；仅 true 的地址可调用 mintRewards
     mapping (address => bool) public isFarm;
 
+    /// @notice 上次因投票触发全量更新池子的时间，配合 7 天窗口触发 _massUpdatePools
     uint public lastUpdatedTimeVotes;
+    /// @notice 全局每秒向所有「基础 alloc」池子分配的总计量（再按 allocPoint 分摊到各池）
     uint public globalSkullPerSecond;
+    /// @notice 全局每秒向所有「社区投票」池子分配的总计量（再按 allocPointCommunity 分摊）
     uint public globalCommunitySkullPerSecond;
     uint256[] public defaultRatios;
     address[] public defaultRewards;
@@ -113,15 +127,15 @@ contract MasterchefV2 is Ownable {
 
     // Info of each pool.
     struct PoolInfo {
-        address stakingFarm;           // Address of Staking Farm contract.
-        uint256 allocPoint;       // How many allocation points assigned to this pool. SKULLs to distribute per block.
-        uint256 allocPointCommunity;       // How many allocation points assigned to this pool. SKULLs to distribute per block.
-        bool isVoteable;
-        bool masterchefControlled;
-        bool countDepositAmountAsVotingPower;
+        address stakingFarm;           // 该池对应的 StakingRewards（Farm）合约地址
+        uint256 allocPoint;            // 基础分配权重：参与 globalSkullPerSecond 分摊
+        uint256 allocPointCommunity;   // 社区投票权重：参与 globalCommunitySkullPerSecond 分摊（可投票池）
+        bool isVoteable;               // 是否允许用户把票投给本池以积累 allocPointCommunity
+        bool masterchefControlled;     // 是否由本合约根据全局参数自动 setRewardRate
+        bool countDepositAmountAsVotingPower; // 为 true 时该 Farm 内质押量计入投票权
 
-        uint256[] ratios;
-        address[] rewards;
+        uint256[] ratios;              // 与 rewards 对齐，万分比，见 mintRewards 中 / 10000
+        address[] rewards;             // 奖励代币（须实现 IBaseToken.mint）
     }
     
     // Info of each pool.
@@ -222,7 +236,10 @@ contract MasterchefV2 is Ownable {
 
     ///// permissionless functions
 
-    // notify reward amount for an individual staking token.
+    /**
+     * @notice Farm 在用户领取时调用：按本池 rewards/ratios 将 _amount 拆成多笔 mint。
+     * @dev 仅 isFarm[msg.sender]；先 updateVotePool 同步投票权变化；_amount 为 StakingRewards 中记账的「奖励计量」。
+     */
     function mintRewards(address _receiver, uint256 _amount) public {
         require(isFarm[msg.sender] == true, "MasterChef: only farms can mint rewards");
         require(block.timestamp >= stakingRewardsGenesis, 'Masterchef: rewards too soon');
@@ -260,11 +277,15 @@ contract MasterchefV2 is Ownable {
         _updatePool(_pid);
     }
 
-    // Update reward variables of the given pool to be up-to-date.
+    /**
+     * @notice 根据全局参数计算本池 StakingRewards 应有的每秒产出，并 setRewardRate。
+     * @dev 可投票池：基础份额 + 社区份额；若 Farm 已被 kill（isFarm 为 false）则清零 alloc 与 rewardRate。
+     */
     function _updatePool(uint256 _pid) internal {
         PoolInfo storage pool = poolInfo[_pid];
         StakingRewardsInfo storage info = stakingRewardsInfoByStakingFarmAddress[pool.stakingFarm];
         if (pool.masterchefControlled == true) {
+            // 基础线：全局每秒产出 * 本池 allocPoint / 总 allocPoint（总为 0 时退化为全局全给，避免除零）
             uint normalRewardRate = totalAllocPoint == 0 ? globalSkullPerSecond : globalSkullPerSecond.mul(pool.allocPoint).div(totalAllocPoint);
             if (pool.isVoteable == true) {
                 uint256 actualRate = IStakingRewards(info.stakingRewards).rewardRate();
@@ -320,6 +341,7 @@ contract MasterchefV2 is Ownable {
     }
 
     /* VOTING */
+    // 用户用 xBASE 投票权为某池「拉」社区每秒份额；至少隔 7 天会全量更新各池 rewardRate，避免长期偏差
 
     function increaseAllocation(uint256 _pid, uint256 _allocPointCommunity) internal {
         if (block.timestamp >= lastUpdatedTimeVotes  + 7 days) {
@@ -400,6 +422,7 @@ contract MasterchefV2 is Ownable {
         voted[_user] = false;
     }
 
+    /// @notice 在铸币前调用：若用户已投票则按最新投票权重算其票的权重；投票权归零则清除投票状态
     function updateVotePool(address _user) internal {
         if (voted[_user]){
             UserInfo storage user = userInfo[_user];

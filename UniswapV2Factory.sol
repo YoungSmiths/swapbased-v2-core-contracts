@@ -503,7 +503,10 @@ contract UniswapV2Pair is IUniswapV2Pair, UniswapV2ERC20 {
 
 pragma solidity =0.5.16;
 
-
+/**
+ * @title UniswapV2Factory
+ * @notice 用 CREATE2 按 token0/token1 确定性部署 Pair；feeTo 非零时 Pair 内 swap 会收取协议费（见 Pair._mintFee）。
+ */
 
 contract UniswapV2Factory is IUniswapV2Factory {
     bytes32 public constant INIT_CODE_PAIR_HASH = keccak256(abi.encodePacked(type(UniswapV2Pair).creationCode));
@@ -524,6 +527,7 @@ contract UniswapV2Factory is IUniswapV2Factory {
         return allPairs.length;
     }
 
+    /// @notice 部署新交易对并双向登记 getPair；token 顺序按地址排序为 token0 < token1
     function createPair(address tokenA, address tokenB) external returns (address pair) {
         require(tokenA != tokenB, 'UniswapV2: IDENTICAL_ADDRESSES');
         (address token0, address token1) = tokenA < tokenB ? (tokenA, tokenB) : (tokenB, tokenA);

@@ -428,6 +428,11 @@ interface IMasterChef {
     function mintRewards(address _receiver, uint256 _amount) external;
 }
 
+/**
+ * @title StakingRewards
+ * @notice 单池质押：Synthetix 式 rewardPerToken 积分；用户领取时由 MasterChef 按池配置铸造多种奖励代币。
+ * @dev 质押扣 depositFee（万分比）至 taxWallet；getReward 另铸 ownerFee 比例给 taxWallet。rewardRate 仅应由 MasterChef 通过 setRewardRate 同步。
+ */
 contract StakingRewards is IStakingRewards, ReentrancyGuard {
     using SafeMath for uint256;
     using SafeERC20 for IERC20;
@@ -435,7 +440,7 @@ contract StakingRewards is IStakingRewards, ReentrancyGuard {
     /* ========== STATE VARIABLES ========== */
     address public masterChef;
     address public taxWallet;
-    IERC20 public rewardsToken;
+    IERC20 public rewardsToken; // 与经典 StakingRewards 兼容的字段；实际发奖走 MasterChef.mintRewards
     IERC20 public stakingToken;
     uint256 public periodFinish = 0;
     uint256 public rewardRate = 0;
@@ -484,6 +489,7 @@ contract StakingRewards is IStakingRewards, ReentrancyGuard {
         return _balances[account];
     }
 
+    /// @notice 每单位质押代币累计的「奖励计量」积分（放大 1e18）；每秒增加 rewardRate/_totalSupply
     function rewardPerToken() public view returns (uint256) {
         if (_totalSupply == 0) {
             return rewardPerTokenStored;
@@ -497,6 +503,7 @@ contract StakingRewards is IStakingRewards, ReentrancyGuard {
             );
     }
 
+    /// @notice 用户待领取 = 余额 * (全局积分 - 用户已结算积分) / 1e18 + 已缓存的 rewards
     function earned(address account) public view returns (uint256) {
         return _balances[account].mul(rewardPerToken().sub(userRewardPerTokenPaid[account])).div(1e18).add(rewards[account]);
     }
@@ -544,13 +551,14 @@ contract StakingRewards is IStakingRewards, ReentrancyGuard {
         emit Withdrawn(msg.sender, amount);
     }
 
+    /// @notice 将已结算的 rewards 通过 MasterChef 铸给用户，并按 ownerFee 给 taxWallet 额外铸一笔
     function getReward() public nonReentrant updateReward(msg.sender) {
         uint256 reward = rewards[msg.sender];
         if (reward > 0) {
             rewards[msg.sender] = 0;
             IMasterChef(masterChef).mintRewards(msg.sender, reward);
 
-            // mint ownerFee
+            // 协议费：按用户 reward 的 ownerFee 万分比再铸给 taxWallet
             IMasterChef(masterChef).mintRewards(taxWallet, reward.mul(ownerFee).div(10000));
             emit RewardPaid(msg.sender, reward, 0);
         }
@@ -563,6 +571,7 @@ contract StakingRewards is IStakingRewards, ReentrancyGuard {
 
     /* ========== MODIFIERS ========== */
 
+    /// @notice 先刷新全局积分再结算 account 的待领取快照（须在 stake/withdraw/getReward 等入口执行）
     modifier updateReward(address account) {
         rewardPerTokenStored = rewardPerToken();
         lastUpdateTime = block.timestamp;

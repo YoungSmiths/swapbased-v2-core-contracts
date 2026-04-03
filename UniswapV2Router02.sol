@@ -395,6 +395,10 @@ pragma solidity =0.6.6;
 
 
 
+/**
+ * @title UniswapV2Router02
+ * @notice 用户与 Pair 交互的入口：加/减流动性、多跳 swap、ETH 包装；ensure(deadline) 防挂单过期。
+ */
 contract UniswapV2Router02 is IUniswapV2Router02 {
     using SafeMath for uint;
 
