@@ -260,7 +260,7 @@
 | 若被问到 | 精读章节（[LEARNING_GUIDE.md](LEARNING_GUIDE.md)） |
 |----------|----------|
 | COIN 谁可 `mint`、`burnFrom` 为何特殊 | **§7** CoinToken |
-| BASE 初始分配与 Operator | **§8** BaseToken |
+| BASE 首发 100 万、后续仅 Operator 增发、适用场景 | **§8**（**§8.1.1** 经济模型） |
 | xBASE→BASE 非 AMM 兑换 | **§10** OtcSwap |
 | LP 定时锁仓与费用 | **§11** BaseTokenLocker |
 
