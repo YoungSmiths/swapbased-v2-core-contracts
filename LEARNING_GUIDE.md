@@ -110,7 +110,7 @@ flowchart TB
 
 ---
 
-## 7. CoinToken
+## 7. CoinToken（COIN）
 
 [`CoinToken.sol`](CoinToken.sol) 实现协议内 **COIN** 代币：在 OpenZeppelin 风格 **ERC20 + ERC20Burnable** 基础上，增加 **`minters` 白名单铸造**、**Operator 角色**（救币与维护铸造者）、以及对 **`burnFrom` / `transferFrom` 的显式覆盖**。COIN 通常作为 **流动性挖矿、质押或衍生品（如 oCOIN）路径中的奖励/计价代币**，由经治理接入的合约按经济模型 `mint` 给用户或池子。
 
@@ -188,11 +188,125 @@ sequenceDiagram
 
 ---
 
-## 8. BaseTokenLocker
+## 8. BaseToken（BASE）
+
+[`BaseToken.sol`](BaseToken.sol) 实现 **BASE** 代币：继承 `ERC20Burnable` 与 `Operator`，**部署时一次性向部署者 mint 100 万枚 BASE**，后续 **`mint` 仅 `onlyOperator`**（无 `minters` 白名单）。BASE 常见用途包括 **底池资产、锁仓费（[`BaseTokenLocker`](BaseTokenLocker.sol)）、协议计价**；**COIN**（第 7 节）更适合 **多合约同时增发奖励**。
+
+### 8.1 BASE 业务场景与实例
+
+| 场景 | 说明 |
+|------|------|
+| **初始流动性** | 部署者持有 1,000,000 BASE，用于添加 BASE/ETH 或分发给合作方做市。 |
+| **锁仓费** | `BaseTokenLocker` 的 `BaseToken` 常指向本合约，用户锁 LP 时支付 `lockFee` 的 BASE。 |
+| **Operator 增发** | 治理将 `Operator` 设为运维地址，按路线图 `mint` 至金库或激励池（链下需约束用途）。 |
+
+**简例**：部署完成后部署者获得 1e6 * 1e18 wei BASE；之后仅 Operator 可调 `mint(recipient, amount)`；用户可 `burn` 销毁自有 BASE。
+
+### 8.2 架构图（BASE 与 COIN 对照）
+
+```mermaid
+flowchart TB
+  subgraph coin [CoinToken_COIN]
+    M[minters多地址mint]
+    SM[setMinters由Operator]
+  end
+  subgraph base [BaseToken_BASE]
+    O[仅Operator可mint]
+    I[部署时一次性mint100万至部署者]
+  end
+```
+
+### 8.3 交互流程图（Operator 增发）
+
+```mermaid
+sequenceDiagram
+  participant Op as Operator
+  participant B as BaseToken
+  participant R as recipient
+  Op->>B: mint(R, amount)
+  Note over B: onlyOperator
+  B->>R: 增加余额与总供给
+```
+
+### 8.4 实现与使用注意
+
+- **无 `minters`**：增发权集中在 Operator；若要让某合约直接 `mint` BASE，需将该合约设为 Operator 或由 Operator 预铸再转入（依部署策略而定）。
+- **`rewardPoolDistributed`**：预留状态位，具体是否使用由外围脚本决定。
+- **与 COIN 分工**：多 Farm、多入口同时 `mint` 更适合 **CoinToken**；单角色控通胀、初始大额分配更适合 **BaseToken**。
+
+更细注释见 [`BaseToken.sol`](BaseToken.sol)。
+
+---
+
+## 9. OtcSwap（xBASE → BASE）
+
+[`masterchefv2/OtcSwap.sol`](masterchefv2/OtcSwap.sol) 实现 **链上柜台兑换**：用户将 **xBASE** 转入 **Owner 地址**（协议国库/多签），按固定 **`swapRate`（百分数，默认 35）** 从合约储备的 **BASE** 中获得 `amount * swapRate / 100`。合约需在兑换前由 Owner **`supplyBASE`** 注入 BASE；源码标注曾用于 **Arbiscan** 验证（2023-05-15）。与 AMM 市价无关，属于 **协议定价的 OTC 池**。
+
+### 9.1 业务场景与实例
+
+| 场景 | 说明 |
+|------|------|
+| **xBASE 退出/回购** | 用户持有挖矿或包装得到的 xBASE，希望换成流动性更好的 BASE；不走 Uniswap 滑点，按公示比例与合约兑换。 |
+| **国库收 xBASE** | 用户支付的 xBASE 全部进入 **`owner()`**，便于团队销毁、再质押或做市，链上 `totalXBASE` 可辅助统计累计回购量。 |
+| **运营调参** | Owner 在 **25%～50%** 间调整 `swapRate`，应对市场或代币经济策略；需同步保证合约内 BASE 余额充足，否则 `otcSwap` 会 `Insufficient BASE`。 |
+
+**简例**：`swapRate = 35`，用户 `approve(OtcSwap, 1000e18)` 后调用 `otcSwap(1000e18)`：向 Owner 转 **1000** 枚 xBASE，用户收到 **350** 枚 BASE（若合约内 BASE ≥ 350）；`totalXBASE` 增加 1000。若协议希望提高兑付比例，Owner 调用 `changeSwapRate(40)`，则同等 1000 xBASE 可换 **400** BASE。
+
+### 9.2 架构图（资金与角色）
+
+```mermaid
+flowchart TB
+  subgraph ext [外部代币]
+    XB[xBASE]
+    BA[BASE]
+  end
+  subgraph otc [OtcSwap 合约]
+    Pool[本合约持有 BASE]
+  end
+  User[用户]
+  Owner[Ownable.owner]
+  User -->|approve + otcSwap| XB
+  XB -->|transferFrom 全额至 owner| Owner
+  Pool -->|transfer baseAmount| User
+  Owner -->|supplyBASE| Pool
+  Pool -->|retrieveBASE| Owner
+```
+
+说明：`supplyBASE` 为 Owner 向合约注入 BASE；`retrieveBASE` 为 Owner 从合约取回 BASE；用户只从合约领取 **`otcSwap` 计算的 BASE**。
+
+### 9.3 交互流程图（一次兑换）
+
+```mermaid
+sequenceDiagram
+  participant U as 用户
+  participant O as OtcSwap
+  participant X as xBASE
+  participant B as BASE
+  participant W as Owner
+  U->>X: approve(OtcSwap, amount)
+  U->>O: otcSwap(amount)
+  O->>X: transferFrom U to W
+  Note over O: baseAmount = amount * swapRate / 100
+  O->>B: transfer U baseAmount
+  Note over O: totalXBASE += amount
+```
+
+### 9.4 实现与使用注意
+
+- **无滑点 AMM**：汇率仅由 `swapRate` 决定，不读取链上池子价格；可能与二级市场存在套利空间，需运营与风控配合。
+- **Owner 收款**：xBASE 直接进入 **owner()**，若 Owner 为合约须能接收 ERC20。
+- **整数除法**：`baseAmount = amount * swapRate / 100` 向下取整，极小 `amount` 可能得到 0 但仍转走全额 xBASE（业务上应避免极小笔）。
+- **BASE 流动性**：须 **`supplyBASE`** 预存；`retrieveBASE` 可随时抽走 BASE，影响用户兑付能力。
+
+更细的 NatSpec 见 [`masterchefv2/OtcSwap.sol`](masterchefv2/OtcSwap.sol)。
+
+---
+
+## 10. BaseTokenLocker
 
 [`BaseTokenLocker.sol`](BaseTokenLocker.sol) 提供 **任意 ERC20（常见为 Uniswap V2 风格 LP Token）的定时锁仓**：用户将代币转入合约并约定 **解锁时间** 与 **领取地址 `withdrawer`**，协议按 **BaseToken 固定费** + **锁仓代币万分比抽成** 向营销地址收费。适用于「团队/做市方承诺一段时间内不抛售 LP」等透明展示场景。
 
-### 8.1 业务场景与实例
+### 10.1 业务场景与实例
 
 | 场景 | 说明 |
 |------|------|
@@ -202,7 +316,7 @@ sequenceDiagram
 
 **简例**：某用户在 Base 上为 SwapBased 池子添加流动性后得到 **100 枚 LP**；团队承诺锁仓 180 天。用户调用 `lockTokensByBase(LP_TOKEN, teamMultisig, 100e18, unlockTs)`，先 **approve** LP 与 BASE，合约扣除 0.5% LP 与 10 万枚 BASE 级固定费（具体以部署参数为准）后，将剩余 LP 记在合约内；180 天后 **`teamMultisig`** 调用 `withdrawTokens(id)` 取回。
 
-### 8.2 架构图（角色与资金）
+### 10.2 架构图（角色与资金）
 
 ```mermaid
 flowchart TB
@@ -222,7 +336,7 @@ flowchart TB
   Core -->|unlock后 transfer| Withdrawer
 ```
 
-### 8.3 交互流程图（锁仓与解锁）
+### 10.3 交互流程图（锁仓与解锁）
 
 ```mermaid
 sequenceDiagram
@@ -244,7 +358,7 @@ sequenceDiagram
   L->>W: transfer LP 剩余数量
 ```
 
-### 8.4 实现与使用注意
+### 10.4 实现与使用注意
 
 - **索引**：`depositsByWithdrawer`、`getDepositsByTokenAddress` 便于前端按人/按代币列出全部 `id`。
 - **`walletTokenBalance`**：在 `lock` 时增加 **存入者** 名下余额，在 `withdraw` 时从 **领取者 `msg.sender`** 名下扣减；若 **`withdrawer` 与存入者不同**，需自行核对是否与业务预期一致（链上原逻辑以源码为准）。
@@ -255,9 +369,9 @@ sequenceDiagram
 
 ---
 
-## 9. 合约地图（按文件）
+## 11. 合约地图（按文件）
 
-### 9.1 根目录
+### 11.1 根目录
 
 
 | 文件                                                                  | 职责简述                                  |
@@ -274,7 +388,7 @@ sequenceDiagram
 | `[helpers/](helpers/)`                                              | `Ownable`、`Context`、`ReentrancyGuard` |
 
 
-### 9.2 `masterchefv2/`
+### 11.2 `masterchefv2/`
 
 
 | 文件                                                                    | 职责简述                                             |
@@ -283,11 +397,11 @@ sequenceDiagram
 | `[MasterChefCoin.sol](masterchefv2/MasterChefCoin.sol)`               | 同上 + `minters` + `mintRewardsByAddress`          |
 | `[StakingRewards.sol](masterchefv2/StakingRewards.sol)`               | LP/单资产质押与奖励积分、`getReward` 调 MasterChef           |
 | `[StakingRewardsFactory.sol](masterchefv2/StakingRewardsFactory.sol)` | 工厂部署/绑定 StakingRewards 类合约                       |
-| `[OtcSwap.sol](masterchefv2/OtcSwap.sol)`                             | OTC 兑换相关逻辑                                       |
+| `[OtcSwap.sol](masterchefv2/OtcSwap.sol)`                             | xBASE→BASE 固定比例 OTC（`otcSwap` / `supplyBASE`，见第 9 节）   |
 | `[Lottery.sol](masterchefv2/Lottery.sol)`                             | 抽奖类合约                                            |
 
 
-### 9.3 `vaultsv2/`
+### 11.3 `vaultsv2/`
 
 
 | 文件                                                                                      | 职责简述                          |
@@ -299,7 +413,7 @@ sequenceDiagram
 | `[farms.json](vaultsv2/farms.json)`                                                     | 前端/运营用农场列表元数据（**非链上配置**）      |
 
 
-### 9.4 其它
+### 11.4 其它
 
 
 | 文件                                 | 职责简述                                      |
@@ -310,27 +424,29 @@ sequenceDiagram
 
 ---
 
-## 10. Solidity 版本与依赖说明
+## 12. Solidity 版本与依赖说明
 
-- 仓库内 **Solidity 版本不统一**：例如 Uniswap 核心多为 **0.5.16**，`masterchefv2` 中 `StakingRewards` 为 **^0.5.16**，`vaultsv2` 部分为 **0.8.12** 等。
+- 仓库内 **Solidity 版本不统一**：例如 Uniswap 核心多为 **0.5.16**，`masterchefv2` 中 `StakingRewards` 为 **^0.5.16**，`OtcSwap` 为 **^0.8.0**（内嵌 OZ v4 风格片段），`vaultsv2` 部分为 **0.8.12** 等。
 - 部分文件内嵌 **OpenZeppelin** 或大段 **Etherscan 验证用** 扁平化代码；实际部署时常以 npm 依赖为准，学习时以**当前文件内 import 与 pragma** 为准。
 - 根目录 **未发现** `foundry.toml` 或 `hardhat.config.`*：本仓库以**源码阅读**为主；若要 fork 测试需自行初始化 Hardhat/Foundry 工程并引入这些合约。
 
 ---
 
-## 11. 学习路径建议
+## 13. 学习路径建议
 
 1. 读 `UniswapV2Pair` 的 `swap` / `mint` / `burn` 与 `lock` 修饰器，理解重入保护与余额检查。
 2. 读 `StakingRewards` 的 `rewardPerToken`、`earned`、`updateReward`、`getReward`。
 3. 读 `MasterchefV2` 的 `mintRewards`、`_updatePool`、`votePool` 与 Owner 管理函数。
 4. 对照 `vaultsv2` 中 `oCOIN` / `xBASE` 与 MasterChef 的交互。
-5. 阅读 `BaseTokenLocker` 的锁仓/解锁与费用逻辑（见上文第 8 节）。
-6. 对照 [`CoinToken.sol`](CoinToken.sol) 与上文第 7 节，理解 `minters` / Operator 与 Farm 奖励的配合。
-7. 用 `[INTERVIEW_PREP.md](INTERVIEW_PREP.md)` 做闭卷问答，回到源码标出行号加深记忆。
+5. 对照 [`BaseToken.sol`](BaseToken.sol) 与上文第 8 节，理解 BASE 的 Operator 铸币与初始分配。
+6. 阅读 [`masterchefv2/OtcSwap.sol`](masterchefv2/OtcSwap.sol) 与上文第 9 节，理解 xBASE→BASE 的固定比例 OTC 与 Owner 注资。
+7. 阅读 `BaseTokenLocker` 的锁仓/解锁与费用逻辑（见上文第 10 节）。
+8. 对照 [`CoinToken.sol`](CoinToken.sol) 与上文第 7 节，理解 `minters` / Operator 与 Farm 奖励的配合。
+9. 用 `[INTERVIEW_PREP.md](INTERVIEW_PREP.md)` 做闭卷问答，回到源码标出行号加深记忆。
 
 ---
 
-## 12. 诚实边界
+## 14. 诚实边界
 
 - 链上部署地址、具体代币经济参数、Owner 多签情况需以**目标网络**的区块浏览器为准。
 - 未附带完整测试套件时，**数学边界、权限组合**应以形式化审查或自建测试为准；本指南不替代安全审计。

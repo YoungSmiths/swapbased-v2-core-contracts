@@ -1007,25 +1007,31 @@ interface IOracle {
 }
 
 
+/**
+ * @title BaseToken
+ * @notice 协议内 **BASE** 代币：名称/符号为 BASE；部署时一次性 **mint 100 万枚** 给部署者；后续增发 **仅 Operator 可 `mint`**。
+ * @dev 与 `CoinToken.sol` 中 COIN 的差异：COIN 使用 **`minters` 多地址白名单** 铸造；BASE 使用 **单 Operator 角色** 铸造，适合由治理多签委托单一运维地址。
+ * @dev `burnFrom` 限制为 **onlyOperator**（与 CoinToken 限制为 onlyMinter 对称）；`governanceRecoverUnsupported` 用于误转代币救回。
+ */
 contract BaseToken is ERC20Burnable, Operator {
     using SafeMath8 for uint8;
     using SafeMath for uint256;
 
-    // Have the rewards been distributed to the pools
+    /// @notice 预留标志位：是否已向各池分配奖励（具体使用依赖外围部署脚本）
     bool public rewardPoolDistributed = false;
 
     /**
-     * @notice Constructs the BASE ERC-20 contract.
+     * @notice 部署 BASE，初始总量 **1_000_000 * 10^18** 全部给 `msg.sender`。
      */
     constructor() public ERC20("BASE", "BASE") {
         _mint(msg.sender, 1000000 ether);
     }
 
     /**
-     * @notice Operator mints BASE to a recipient
-     * @param recipient_ The address of recipient
-     * @param amount_ The amount of BASE to mint to
-     * @return whether the process has been done
+     * @notice Operator 向任意地址增发 BASE（通胀入口，权限敏感）。
+     * @param recipient_ 接收地址
+     * @param amount_ 数量（最小单位）
+     * @return 铸币后余额是否大于铸币前（正常为 true）
      */
     function mint(address recipient_, uint256 amount_) public onlyOperator returns (bool) {
         uint256 balanceBefore = balanceOf(recipient_);
@@ -1035,14 +1041,17 @@ contract BaseToken is ERC20Burnable, Operator {
         return balanceAfter > balanceBefore;
     }
 
+    /// @notice 持有者销毁自有 BASE
     function burn(uint256 amount) public override {
         super.burn(amount);
     }
 
+    /// @notice 从 `account` 销毁 BASE：需 allowance；**仅 Operator** 可调用（与标准 burnFrom 开放给 spender 不同）
     function burnFrom(address account, uint256 amount) public override onlyOperator {
         super.burnFrom(account, amount);
     }
 
+    /// @notice 与 CoinToken 相同：先转账再扣减 allowance
     function transferFrom(
         address sender,
         address recipient,
@@ -1054,6 +1063,7 @@ contract BaseToken is ERC20Burnable, Operator {
         return true;
     }
 
+    /// @notice 将误转入本合约的 **其它** ERC20 转给 `_to`（**仅 Operator**）
     function governanceRecoverUnsupported(
         IERC20 _token,
         uint256 _amount,

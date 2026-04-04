@@ -1009,12 +1009,13 @@ contract Operator is Context, Ownable {
 
 /**
  * @title CoinToken
- * @notice 协议内 COIN 奖励代币：标准 ERC20、支持销毁与 Operator 治理；**仅白名单地址可增发（mint）**。
- * @dev
- * - 继承 `ERC20Burnable`：任意持有人可 `burn` 销毁自有代币；`burnFrom` 在本合约中被限制为 **onlyMinter**（与常见 OpenZeppelin 行为不同，避免仅凭 allowance 由第三方大规模销毁他人余额）。
- * - 继承 `Operator`：`governanceRecoverUnsupported` 与 `setMinters` 由 Operator 执行。
- * - 构造函数将 `minters[msg.sender] = true`，部署者即为首批铸造者。
- * - `transferFrom` 显式重写：先转账再扣减授权，语义与父类 ERC20 一致。
+ * @notice 协议内 **COIN** 奖励代币：标准 ERC20、可销毁、Operator 运维；**仅 `minters` 白名单可调用 `mint` 增发**。
+ * @dev 与 `BaseToken.sol` 中 **BASE** 的差异：BASE 的 `mint` 为 **onlyOperator**（单角色）；COIN 为 **onlyMinter**（多地址白名单，适合同时接入 MasterChef、多 Farm、金库等）。
+ * @dev 继承说明：
+ * - `ERC20Burnable`：用户可 `burn` 自毁；本合约将 `burnFrom` 改为 **onlyMinter**，避免任意第三方凭 allowance 销毁他人 COIN。
+ * - `Operator`：`setMinters`、`governanceRecoverUnsupported` 仅 Operator。
+ * - 构造函数：`minters[msg.sender] = true`，部署者为首个铸造者。
+ * - `transferFrom` 显式重写：先 `_transfer` 再扣减 allowance，与 IERC20 语义一致。
  */
 contract CoinToken is ERC20Burnable, Operator {
     using SafeMath8 for uint8;
@@ -1045,11 +1046,11 @@ contract CoinToken is ERC20Burnable, Operator {
      * @dev 内部调用 `_mint` 增加 `_totalSupply` 与 `_balances[recipient_]`；仅 minter 可调用。
      */
     function mint(address recipient_, uint256 amount_) public onlyMinter returns (bool) {
-        // 铸币前后对比余额，作为成功断言（与仅依赖 _mint 不 revert 的语义一致）
+        // 核心：仅 minters 可增发；_mint 增加 totalSupply 与 recipient_ 余额（MasterChef 等通过 IBaseToken.mint 对接）
         uint256 balanceBefore = balanceOf(recipient_);
         _mint(recipient_, amount_);
         uint256 balanceAfter = balanceOf(recipient_);
-
+        // 返回铸币后余额是否增加，供外部脚本做成功断言
         return balanceAfter > balanceBefore;
     }
 
@@ -1085,6 +1086,7 @@ contract CoinToken is ERC20Burnable, Operator {
         address recipient,
         uint256 amount
     ) public override returns (bool) {
+        // 核心：先划账再扣减 msg.sender 对 sender 的 allowance，避免继承链中行为歧义
         _transfer(sender, recipient, amount);
 
         _approve(sender, _msgSender(), allowance(sender, _msgSender()).sub(amount, "ERC20: transfer amount exceeds allowance"));
@@ -1113,6 +1115,7 @@ contract CoinToken is ERC20Burnable, Operator {
      * @dev 仅 Operator；撤销后该地址无法再增发 COIN。
      */
     function setMinters(address _minter, bool _canMint) public onlyOperator {
+        // 核心：动态增删铸造者；撤销后该地址无法再 mint（已部署的 Farm 需同步链下配置）
         minters[_minter] = _canMint;
     }
 
