@@ -94,27 +94,44 @@ library TickMath {
     }
 }
 
+/**
+ * @title oCOIN
+ * @notice COIN 的期权/归属包装代币：支持 **lock**（COIN 销毁换 oCOIN）、**vest / vestBond** 归属、`instantExit` 付 WETH 惩罚即时退出、`claim` 经 **MasterChef 铸币**；价格可接 **V2 储备** 或 **V3 TWAP**（`quotePrice`）。
+ * @dev `minters` 由 Operator 配置；`instantExit` 与 `claim` 均依赖已配置的 `masterChef`。
+ */
 contract oCOIN is ERC20("oCOIN Token", "oCOIN"), Ownable, ReentrancyGuard { 
     using SafeERC20 for IERC20;
     using SafeMath for uint256;
+    /// @notice 用于 V2 现货价（`getCOINCurrentPrice`）的 Pair
     IUniswapV2Pair public uniswapV2Pair;
 
     uint256 public constant PRECISION = 100;
+    /// @notice 是否允许 `instantExit`
     bool public optionEnabled = true;
+    /// @notice 用户支付即时退出惩罚的计价资产（通常为 WETH）
     address public weth;
+    /// @notice 底层 COIN 代币地址
     address public coinToken;
     uint256 public rewardRate;
     address public masterChef;
     address public _operator;
+    /// @notice 即时退出时「立即兑现」比例（百分数，默认 30）
     uint256 public exitRatio = 30; // get 30% liquid
+    /// @notice `vestBond` 计入 `totalVested` 的倍数（百分数，默认 150）
     uint256 public exitRatioBond = 150; // 1.5x
 
+    /// @notice V3 `observe` 的时间窗口（秒），用于 TWAP
     uint32 public duration = 30; // 30 secs ago
+    /// @notice true 使用 V2 储备价；false 使用 V3 Pool + `TickMath`
     bool public usingLegacyPair = false; // defaults to using V3
+    /// @notice V3 池地址（`usingLegacyPair == false` 时使用）
     address public tokenV3PoolAddress; // starts null
 
+    /// @notice 可调用 `mint` 增发的白名单
     mapping(address => bool) public minters;
 
+    /// @param _weth WETH 合约地址
+    /// @param _coinToken COIN 合约地址
     constructor(address _weth, address _coinToken) {
         _operator = msg.sender;
         weth = _weth;
@@ -148,6 +165,11 @@ contract oCOIN is ERC20("oCOIN Token", "oCOIN"), Ownable, ReentrancyGuard {
     uint256 public vestingPeriod = 60 days;
     uint256 public bondVestingPeriod = 150 days;
 
+    /**
+     * @notice Minter 增发 oCOIN。
+     * @param recipient_ 接收地址
+     * @param amount_ 铸造数量
+     */
     function mint(address recipient_, uint256 amount_) external onlyMinter returns (bool) {
         _mint(recipient_, amount_);
         return true;
@@ -157,6 +179,7 @@ contract oCOIN is ERC20("oCOIN Token", "oCOIN"), Ownable, ReentrancyGuard {
         _burn(msg.sender, _amount);
     }
 
+    /// @notice 查询归属剩余时间；参数语义与实现见链上逻辑（与 xBASE 类似结构）
     function remainTime(address _address, uint256 id) public view returns(uint256) {
         uint256 timePass = block.timestamp.sub(userInfo[_address][id].lastInteractionTime);
         uint256 remain;
@@ -169,6 +192,10 @@ contract oCOIN is ERC20("oCOIN Token", "oCOIN"), Ownable, ReentrancyGuard {
         return remain;
     }
 
+    /**
+     * @notice 用户转入 COIN 并销毁，**1:1 铸造 oCOIN**。
+     * @param _amount COIN 数量
+     */
     function lock(uint256 _amount) external nonReentrant {
         require(IERC20(coinToken).balanceOf(msg.sender) >= _amount, "COIN balance too low");
         uint256 amountOut = _amount;
@@ -177,6 +204,10 @@ contract oCOIN is ERC20("oCOIN Token", "oCOIN"), Ownable, ReentrancyGuard {
         IERC20Burnable(coinToken).burn(_amount);
     }
 
+    /**
+     * @notice 销毁 oCOIN 并开启 **60 天** 归属，`totalVested` 等于 `_amount`。
+     * @param _amount 参与 vest 的 oCOIN 数量
+     */
     function vest(uint256 _amount) external nonReentrant {
 
         require(this.balanceOf(msg.sender) >= _amount, "oCOIN balance too low");
@@ -191,6 +222,10 @@ contract oCOIN is ERC20("oCOIN Token", "oCOIN"), Ownable, ReentrancyGuard {
         _burn(msg.sender, _amount);
     }
 
+    /**
+     * @notice 销毁 oCOIN 并开启 **150 天** 归属，`totalVested = _amount * exitRatioBond / 100`。
+     * @param _amount 参与 vestBond 的 oCOIN 数量
+     */
     function vestBond(uint256 _amount) external nonReentrant {
 
         require(this.balanceOf(msg.sender) >= _amount, "oCOIN balance too low");
@@ -209,6 +244,11 @@ contract oCOIN is ERC20("oCOIN Token", "oCOIN"), Ownable, ReentrancyGuard {
      * @dev exit instantly with a penalty
      * @param _amount amount of oCOIN to exit
      * @param maxPayAmount maximum amount of eth user is willing to pay
+     */
+    /**
+     * @notice 销毁全部 `_amount` 的 oCOIN，按 `quotePrice` 从用户收取 WETH 给 `_operator`，并向用户 **mintRewards**（计量与 `exitRatio` 相关）。
+     * @param _amount 退出用的 oCOIN 数量
+     * @param maxPayAmount 用户愿意支付的最大 WETH（防滑点）
      */
     function instantExit(
         uint256 _amount,
@@ -236,6 +276,7 @@ contract oCOIN is ERC20("oCOIN Token", "oCOIN"), Ownable, ReentrancyGuard {
     }
 
 
+    /// @notice 预估 `instantExit` 所需支付的 WETH 数量（视图）
     function quotePayment(
         uint256 amount
     ) public view returns (uint256 payAmount) {
@@ -244,6 +285,7 @@ contract oCOIN is ERC20("oCOIN Token", "oCOIN"), Ownable, ReentrancyGuard {
         payAmount = quotePrice(amountToPay);
     }
 
+    /// @notice 基于 V2 Pair 储备推算 COIN 价格（依赖 `uniswapV2Pair` 与 token0/token1 顺序）
     function getCOINCurrentPrice() public view returns (uint256) {
         // Get reserves of token0 and token1
         (uint256 reserve0, uint256 reserve1, ) = uniswapV2Pair.getReserves();
@@ -258,6 +300,10 @@ contract oCOIN is ERC20("oCOIN Token", "oCOIN"), Ownable, ReentrancyGuard {
         }
     }
 
+    /**
+     * @notice 将 `amountIn` 规模的 COIN 计价（名义）换算为应付 WETH：V2 用储备价，V3 用 `observe` + `TickMath`。
+     * @param amountIn 计价基准数量（与 instantExit 内 `(100-exitRatio)%` 部分配合）
+     */
     function quotePrice(
         uint256 amountIn
     ) public view returns (uint256 amountOut) {
@@ -300,6 +346,10 @@ contract oCOIN is ERC20("oCOIN Token", "oCOIN"), Ownable, ReentrancyGuard {
     }
 
 
+    /**
+     * @notice 归属结束后按 `totalVested` 调用 `mintRewards` 领取。
+     * @param id 用户 `userInfo` 仓位索引
+     */
     function claim(uint256 id) external nonReentrant {
         require(remainTime(msg.sender, id) == 0, "vesting not end");
         vestPosition storage position = userInfo[msg.sender][id];

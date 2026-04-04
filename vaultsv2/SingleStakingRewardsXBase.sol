@@ -430,6 +430,11 @@ interface IERC20Burnable {
     function burn(uint256 amount) external;
 }
 
+/**
+ * @title SingleStakingRewardsXBase
+ * @notice 与 `SingleStakingRewardsBase` 相同积分模型与 `mintRewards` 领奖路径；**`setRewardRate` 仅允许 `masterChef`**（不允许 taxWallet 直接改速率）。
+ * @dev 适用于希望速率 **完全由 Chef** 控制的部署；费率类调整仍可由 `taxWallet` 调用 `setOwnerFeeFromRewardRate` 等。
+ */
 contract SingleStakingRewardsXBase is IStakingRewards, ReentrancyGuard {
     using SafeMath for uint256;
     using SafeERC20 for IERC20;
@@ -463,6 +468,13 @@ contract SingleStakingRewardsXBase is IStakingRewards, ReentrancyGuard {
 
     /* ========== CONSTRUCTOR ========== */
 
+    /**
+     * @param _masterChef MasterChef 合约
+     * @param _taxWallet 税费与配置地址
+     * @param _stakingToken 质押代币
+     * @param _rewardRate 初始每秒奖励
+     * @param _farmStartTime Farm 开始计奖时间
+     */
     constructor(
         address _masterChef,
         address _taxWallet,

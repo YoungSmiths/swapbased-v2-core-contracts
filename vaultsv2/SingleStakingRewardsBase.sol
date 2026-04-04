@@ -430,6 +430,11 @@ interface IERC20Burnable {
     function burn(uint256 amount) external;
 }
 
+/**
+ * @title SingleStakingRewardsBase
+ * @notice **单币质押 Farm**：与 `masterchefv2/StakingRewards` 同构的 `rewardPerToken` 模型；`getReward` 经 **MasterChef.mintRewards** 发奖，并对 `taxWallet` 铸 **ownerFee**。
+ * @dev `setRewardRate` 可由 **masterChef 或 taxWallet** 调用（`onlyMasterChefOrTaxWallet`）；可选 **burnFee** 从质押代币销毁一部分。
+ */
 contract SingleStakingRewardsBase is IStakingRewards, ReentrancyGuard {
     using SafeMath for uint256;
     using SafeERC20 for IERC20;
@@ -463,6 +468,13 @@ contract SingleStakingRewardsBase is IStakingRewards, ReentrancyGuard {
 
     /* ========== CONSTRUCTOR ========== */
 
+    /**
+     * @param _masterChef MasterChef 地址（`mintRewards` 网关）
+     * @param _taxWallet 收 depositFee / 协议费地址，且可改 `masterChef` 与费率
+     * @param _stakingToken 用户质押的 ERC20
+     * @param _rewardRate 初始每秒奖励计量
+     * @param _farmStartTime 早于该时间不计累积奖励
+     */
     constructor(
         address _masterChef,
         address _taxWallet,
@@ -506,6 +518,7 @@ contract SingleStakingRewardsBase is IStakingRewards, ReentrancyGuard {
 
     /* ========== MUTATIVE FUNCTIONS ========== */
 
+    /// @notice permit 授权并质押；扣 depositFee，可选 burnFee 销毁
     function stakeWithPermit(uint256 amount, uint deadline, uint8 v, bytes32 r, bytes32 s) external nonReentrant updateReward(msg.sender) {
         require(amount > 0, "Cannot stake 0");
 
@@ -531,6 +544,7 @@ contract SingleStakingRewardsBase is IStakingRewards, ReentrancyGuard {
         emit Staked(msg.sender, amount);
     }
 
+    /// @param amount 质押数量（扣费后净额计入权重）
     function stake(uint256 amount) external nonReentrant updateReward(msg.sender) {
         require(amount > 0, "Cannot stake 0");
 
@@ -553,6 +567,7 @@ contract SingleStakingRewardsBase is IStakingRewards, ReentrancyGuard {
         emit Staked(msg.sender, amount);
     }
 
+    /// @param amount 取出本金数量
     function withdraw(uint256 amount) public nonReentrant updateReward(msg.sender) {
         require(amount > 0, "Cannot withdraw 0");
         _totalSupply = _totalSupply.sub(amount);
@@ -561,6 +576,7 @@ contract SingleStakingRewardsBase is IStakingRewards, ReentrancyGuard {
         emit Withdrawn(msg.sender, amount);
     }
 
+    /// @notice 领取奖励：对用户与 taxWallet 各调用一次 `mintRewards`
     function getReward() public nonReentrant updateReward(msg.sender) {
         uint256 reward = rewards[msg.sender];
         if (reward > 0) {
@@ -599,11 +615,13 @@ contract SingleStakingRewardsBase is IStakingRewards, ReentrancyGuard {
 
     /* ========== FARMS CONTROLS ========== */
 
+    /// @param _rewardRate 新的每秒奖励速率（由 Chef 或 taxWallet 同步）
     function setRewardRate(uint256 _rewardRate) public onlyMasterChefOrTaxWallet {
         rewardRate = _rewardRate;
         lastUpdateTime = block.timestamp;
     }
 
+    /// @param _masterChef 新 MasterChef（仅 taxWallet 可调）
     function setMasterChef(address _masterChef) public {
         require(taxWallet == msg.sender, "Not the owner");
         masterChef = _masterChef;

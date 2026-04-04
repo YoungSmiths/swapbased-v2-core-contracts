@@ -108,6 +108,8 @@ flowchart TB
 - `**oCOIN**`：与 `coinToken`、WETH、可选 V2/V3 价格源结合；支持 `lock`/`vest`/`instantExit`/`claim` 等；部分出口调用 `IMasterChef(masterChef).mintRewards`（见 `[vaultsv2/oCOIN.sol](vaultsv2/oCOIN.sol)`）。
 - `**SingleStakingRewardsBase` / `XBase` / `OtherTokens**`：与 `masterchefv2/StakingRewards` 同思路的单币质押变体，用于不同质押资产或奖励路径。
 
+更细的架构、流程与文件说明见 **第 12 节**。
+
 ---
 
 ## 7. CoinToken（COIN）
@@ -442,9 +444,68 @@ sequenceDiagram
 
 ---
 
-## 12. 合约地图（按文件）
+## 12. Vaults v2（xBASE / oCOIN / 单币质押）
 
-### 12.1 根目录
+[`vaultsv2/`](vaultsv2/) 与 [`masterchefv2/`](masterchefv2/) **无源码 import 依赖**，通过部署时写入 **`masterChef` 地址**与 **代币地址** 对接：衍生代币合约（xBASE、oCOIN）在 **claim / instantExit** 等路径调用 **`IMasterChef.mintRewards`**；单币质押合约则与 `StakingRewards` 同构，由 **Chef 或简化工厂** 控制 **`setRewardRate`** 与 **铸币**。Solidity **0.8.12**（xBASE、oCOIN）与 **^0.5.16**（`SingleStakingRewards*`）并存。
+
+### 12.1 业务场景与实例
+
+| 组件 | 说明 |
+|------|------|
+| **xBASE** | 用户 **`lock`**：转入 BASE → 合约销毁 BASE 并 **1:1 铸 xBASE**；**`vest` / `vestHalf`** 销毁 xBASE 并记录归属；**`claim`** 到期后 **`mintRewards(msg.sender, totalVested)`**。Operator 可 **`mint`** 增发。 |
+| **oCOIN** | 用户 **`lock`**：转入 COIN 并销毁，**1:1 铸 oCOIN**；**`vest` / `vestBond`** 长期归属；**`instantExit`** 付 **WETH**（经 `quotePrice`，V2 储备或 V3 TWAP）并 **`mintRewards`**；**`claim`** 归属结束领奖励。 |
+| **SingleStakingRewardsBase / XBase** | 与主仓库 **`StakingRewards`** 类似：**`getReward` → `mintRewards` + taxWallet 协议费**；Base 版 **`setRewardRate`** 可由 **Chef 或 taxWallet**；XBase 版 **仅 Chef** 可改速率。 |
+| **SingleStakingRewardsOtherTokens** | 奖励从本合约 **`rewardsToken` 余额** 转出，**不调用 MasterChef**，适合预注资池。 |
+| **SingleStakingRewardsFactoryXBase** | 在 vault 侧部署的 **单币奖励工厂**，`mintRewards` 只铸 **一个 `rewardsToken`**，语义接近 **`StakingRewardsFactory`**。 |
+
+**简例**：部署 `MasterChefCoin` 后，将地址写入 **`xBASE.setMasterChef`**。用户从 AMM 取得 BASE，**`lock` 得到 xBASE**，参与治理投票（Chef 的 `xBASE` 指针指向该代币）。另一用户持有 COIN，**`oCOIN.lock`** 得到 oCOIN，选择 **`vest`** 到期 **`claim`**，Chef 按池 **`ratios`** 铸 COIN/BASE 等。
+
+### 12.2 架构图（与 Chef 的关系）
+
+```mermaid
+flowchart LR
+  subgraph vault [vaultsv2]
+    XB[xBASE / oCOIN]
+    SS[SingleStakingRewardsBase等]
+    FO[FactoryXBase可选]
+  end
+  subgraph chef [已部署 MasterChef]
+    MC[mintRewards网关]
+  end
+  XB -->|claim / instantExit| MC
+  SS -->|getReward| MC
+  FO -->|mintRewards| MC
+```
+
+### 12.3 交互流程图（xBASE 归属领取）
+
+```mermaid
+sequenceDiagram
+  participant U as 用户
+  participant X as xBASE
+  participant C as MasterChef
+  participant T as 奖励代币
+  U->>X: vest(amount)
+  Note over X: 销毁xBASE，写入userInfo
+  U->>X: claim(id)
+  X->>C: mintRewards(U, totalVested)
+  C->>T: IBaseToken.mint 多笔按ratios
+```
+
+### 12.4 实现与使用注意
+
+- **Chef 地址**：`xBASE` / `oCOIN` 的 `masterChef` 必须指向已部署且配置好 **Farm / ratios** 的 Chef，否则 `mintRewards` 会失败或非预期拆分。
+- **价格预言**：`oCOIN` 的 `usingLegacyPair` / `tokenV3Pool` / `duration` 决定 **`quotePrice`** 行为，部署错误会导致 **`instantExit`** 支付额异常。
+- **`remainTime`**：xBASE/oCOIN 中视图函数参数与 `msg.sender` 混用，前端调用 **`claim` 前** 建议以链上实测为准。
+- **预存型 OtherTokens**：`SingleStakingRewardsOtherTokens` **不会** `mintRewards`，需事先向合约转入足够 **`rewardsToken`**。
+
+更细的 NatSpec 见 [`vaultsv2/xBASE.sol`](vaultsv2/xBASE.sol)、[`vaultsv2/oCOIN.sol`](vaultsv2/oCOIN.sol) 及 `SingleStakingRewards*.sol`。
+
+---
+
+## 13. 合约地图（按文件）
+
+### 13.1 根目录
 
 
 | 文件                                                                  | 职责简述                                  |
@@ -461,7 +522,7 @@ sequenceDiagram
 | `[helpers/](helpers/)`                                              | `Ownable`、`Context`、`ReentrancyGuard` |
 
 
-### 12.2 `masterchefv2/`
+### 13.2 `masterchefv2/`
 
 
 | 文件                                                                    | 职责简述                                             |
@@ -474,19 +535,19 @@ sequenceDiagram
 | `[Lottery.sol](masterchefv2/Lottery.sol)`                             | 抽奖类合约                                            |
 
 
-### 12.3 `vaultsv2/`
+### 13.3 `vaultsv2/`
 
 
 | 文件                                                                                      | 职责简述                          |
 | --------------------------------------------------------------------------------------- | ----------------------------- |
-| `[xBASE.sol](vaultsv2/xBASE.sol)`                                                       | xBASE ERC20、归属与 MasterChef 奖励 |
-| `[oCOIN.sol](vaultsv2/oCOIN.sol)`                                                       | oCOIN、锁仓/归属/即时退出、价格引用         |
-| `[SingleStakingRewardsBase.sol](vaultsv2/SingleStakingRewardsBase.sol)` 等               | 单币质押奖励实现变体                    |
-| `[SingleStakingRewardsFactoryXBase.sol](vaultsv2/SingleStakingRewardsFactoryXBase.sol)` | 工厂                            |
+| `[xBASE.sol](vaultsv2/xBASE.sol)`                                                       | xBASE、归属与 `mintRewards`（见第 12 节）   |
+| `[oCOIN.sol](vaultsv2/oCOIN.sol)`                                                       | oCOIN、归属/即时退出、V2/V3 价格（见第 12 节）   |
+| `[SingleStakingRewardsBase.sol](vaultsv2/SingleStakingRewardsBase.sol)` 等               | 单币质押、`mintRewards` 变体（见第 12 节）   |
+| `[SingleStakingRewardsFactoryXBase.sol](vaultsv2/SingleStakingRewardsFactoryXBase.sol)` | 单币奖励工厂（见第 12 节）                 |
 | `[farms.json](vaultsv2/farms.json)`                                                     | 前端/运营用农场列表元数据（**非链上配置**）      |
 
 
-### 12.4 其它
+### 13.4 其它
 
 
 | 文件                                 | 职责简述                                      |
@@ -497,7 +558,7 @@ sequenceDiagram
 
 ---
 
-## 13. Solidity 版本与依赖说明
+## 14. Solidity 版本与依赖说明
 
 - 仓库内 **Solidity 版本不统一**：例如 Uniswap 核心多为 **0.5.16**，`masterchefv2` 中 `StakingRewards` 为 **^0.5.16**，`OtcSwap` 为 **^0.8.0**（内嵌 OZ v4 风格片段），`vaultsv2` 部分为 **0.8.12** 等。
 - 部分文件内嵌 **OpenZeppelin** 或大段 **Etherscan 验证用** 扁平化代码；实际部署时常以 npm 依赖为准，学习时以**当前文件内 import 与 pragma** 为准。
@@ -505,13 +566,13 @@ sequenceDiagram
 
 ---
 
-## 14. 学习路径建议
+## 15. 学习路径建议
 
 1. 读 `UniswapV2Pair` 的 `swap` / `mint` / `burn` 与 `lock` 修饰器，理解重入保护与余额检查。
 2. 读 `StakingRewards` 的 `rewardPerToken`、`earned`、`updateReward`、`getReward`。
 3. 读 `MasterchefV2` 的 `mintRewards`、`_updatePool`、`votePool` 与 Owner 管理函数。
 4. 对照 **上文第 9 节** 与 `masterchefv2` 下 `StakingRewards` / `MasterChefCoin`，建立「Chef 网关 + Farm」整体心智模型。
-5. 对照 `vaultsv2` 中 `oCOIN` / `xBASE` 与 MasterChef 的交互。
+5. 阅读 **上文第 12 节** 与 [`vaultsv2/xBASE.sol`](vaultsv2/xBASE.sol)、[`vaultsv2/oCOIN.sol`](vaultsv2/oCOIN.sol)、`SingleStakingRewards*.sol`，理解衍生代币与 Chef 的衔接。
 6. 对照 [`BaseToken.sol`](BaseToken.sol) 与上文第 8 节，理解 BASE 的 Operator 铸币与初始分配。
 7. 阅读 [`masterchefv2/OtcSwap.sol`](masterchefv2/OtcSwap.sol) 与上文第 10 节，理解 xBASE→BASE 的固定比例 OTC 与 Owner 注资。
 8. 阅读 `BaseTokenLocker` 的锁仓/解锁与费用逻辑（见上文第 11 节）。
@@ -520,7 +581,7 @@ sequenceDiagram
 
 ---
 
-## 15. 诚实边界
+## 16. 诚实边界
 
 - 链上部署地址、具体代币经济参数、Owner 多签情况需以**目标网络**的区块浏览器为准。
 - 未附带完整测试套件时，**数学边界、权限组合**应以形式化审查或自建测试为准；本指南不替代安全审计。

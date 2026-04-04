@@ -426,6 +426,11 @@ interface IERC20Burnable {
     function burn(uint256 amount) external;
 }
 
+/**
+ * @title SingleStakingRewardsOtherTokens
+ * @notice 单币质押积分模型与同类合约一致，但 **奖励从本合约预存的 `rewardsToken` 余额中 `transfer`，不经 MasterChef 铸币**。
+ * @dev `setRewardRate` 仅 `taxWallet`；无 `masterChef` 状态变量，适合「池内已注资 ERC20 奖励」场景。
+ */
 contract SingleStakingRewardsOtherTokens is IStakingRewards, ReentrancyGuard {
     using SafeMath for uint256;
     using SafeERC20 for IERC20;
@@ -458,6 +463,13 @@ contract SingleStakingRewardsOtherTokens is IStakingRewards, ReentrancyGuard {
 
     /* ========== CONSTRUCTOR ========== */
 
+    /**
+     * @param _taxWallet 收手续费与配置费率的地址
+     * @param _stakingToken 用户质押代币
+     * @param _rewardsToken 从本合约余额支付的奖励代币
+     * @param _rewardRate 每秒奖励速率
+     * @param _farmStartTime 开始累积奖励的时间
+     */
     constructor(
         address _taxWallet,
         address _stakingToken,
@@ -556,6 +568,7 @@ contract SingleStakingRewardsOtherTokens is IStakingRewards, ReentrancyGuard {
         emit Withdrawn(msg.sender, amount);
     }
 
+    /// @notice 从合约余额向用户转 `rewardsToken`；若余额不足则转尽余额
     function getReward() public nonReentrant updateReward(msg.sender) {
         uint256 reward = rewards[msg.sender];
         if (reward > 0) {

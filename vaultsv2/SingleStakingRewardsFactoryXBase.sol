@@ -80,6 +80,11 @@ interface IBaseToken {
     function mint(address recipient_, uint256 amount_) external returns (bool);
 }
 
+/**
+ * @title SingleStakingRewardsFactoryXBase
+ * @notice **vaultsv2 专用**简化 Chef：注册 `SingleStakingRewardsXBase` Farm 地址，`mintRewards` 仅向单一 `rewardsToken` 铸造（逻辑对齐 `masterchefv2/StakingRewardsFactory`）。
+ * @dev `deploy` 传入已部署的 Farm 合约地址；`updatePool` 按 `globalSkullPerSecond` 与 `allocPoint` 调用各 Farm 的 `setRewardRate`。
+ */
 contract SingleStakingRewardsFactoryXBase is Ownable {
     using SafeMath for uint256;
     // immutables
@@ -113,6 +118,10 @@ contract SingleStakingRewardsFactoryXBase is Ownable {
     // rewards info by staking token
     mapping(address => StakingRewardsInfo) public stakingRewardsInfoByStakingFarmAddress;
 
+    /**
+     * @param _rewardsToken `mintRewards` 时铸造的 IBaseToken
+     * @param _stakingRewardsGenesis 全局允许发奖的起始时间
+     */
     constructor(
         address _rewardsToken,
         uint _stakingRewardsGenesis
@@ -125,8 +134,11 @@ contract SingleStakingRewardsFactoryXBase is Ownable {
 
     ///// permissioned functions
 
-    // deploy a staking reward contract for the staking token, and store the reward amount
-    // the reward will be distributed to the staking reward contract no sooner than the genesis
+    /**
+     * @notice 注册已部署的 Farm（`SingleStakingRewardsXBase`）合约地址。
+     * @param _farmAddress Farm 合约地址
+     * @param _farmStartTime 预留参数（本实现未强校验，以 Farm 构造为准）
+     */
     function deploy(address _farmAddress, uint256 _farmStartTime) public onlyOwner {
         StakingRewardsInfo storage info = stakingRewardsInfoByStakingFarmAddress[_farmAddress];
         require(info.stakingRewards == address(0), 'MasterChef: already deployed');
@@ -141,7 +153,11 @@ contract SingleStakingRewardsFactoryXBase is Ownable {
 
     ///// permissionless functions
 
-    // notify reward amount for an individual staking token.
+    /**
+     * @notice 由已注册 Farm 调用，向 `_receiver` 铸造 `_amount` 的 `rewardsToken`。
+     * @param _receiver 奖励接收方
+     * @param _amount 铸造数量
+     */
     function mintRewards(address _receiver, uint256 _amount) public {
         require(isFarm[msg.sender] == true, "MasterChef: only farms can mint rewards");
         require(block.timestamp >= stakingRewardsGenesis, 'Masterchef: rewards too soon');
@@ -164,7 +180,7 @@ contract SingleStakingRewardsFactoryXBase is Ownable {
         }
     }
 
-    // Update reward variables of the given pool to be up-to-date.
+    /// @param _pid `poolInfo` 索引
     function updatePool(uint256 _pid) public {
         PoolInfo storage pool = poolInfo[_pid];
         StakingRewardsInfo storage info = stakingRewardsInfoByStakingFarmAddress[pool.stakingFarm];
