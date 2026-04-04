@@ -29,7 +29,7 @@
 | **10** | OtcSwap | xBASE→BASE OTC | 与 **§8/§12** 衔接 |
 | **11** | BaseTokenLocker | LP 锁仓与费用 | 工具层 |
 | **12** | Vaults v2（详解） | 与 Chef 衔接、单币池差异 | **D、F1** |
-| **13** | 合约地图 | 按目录速查文件 | 定位源码 |
+| **13** | 合约地图 | 按目录速查文件；**§13.1.1** 说明 `interfaces/` 与 ABI | 定位源码 |
 | **14** | Solidity 与依赖 | 版本、扁平化代码 | **E3** |
 | **15** | 学习路径建议 | 推荐阅读顺序 | 与 **§0.3** 一致 |
 | **16** | 诚实边界 | 链上/审计边界 | **E** |
@@ -587,10 +587,42 @@ sequenceDiagram
 | `[BaseToken.sol](BaseToken.sol)` / `[CoinToken.sol](CoinToken.sol)` | 项目代币实现（含 OpenZeppelin 风格片段）           |
 | `[BaseTokenLocker.sol](BaseTokenLocker.sol)`                        | 代币锁仓相关逻辑                              |
 | `[Multicall2.sol](Multicall2.sol)`                                  | 批量静态调用，便于前端聚合读                        |
-| `[interfaces/](interfaces/)`                                        | Uniswap V2 与 IERC20 等接口               |
+| `[interfaces/](interfaces/)`                                        | Uniswap V2 与 IERC20 的 **Solidity 接口源码**（见下 **§13.1.1**） |
 | `[libraries/](libraries/)`                                          | `SafeMath`、`Math`、`UQ112x112`         |
 | `[helpers/](helpers/)`                                              | `Ownable`、`Context`、`ReentrancyGuard` |
 
+
+### 13.1.1 `interfaces/`：Solidity 接口与 ABI 的关系、引用位置
+
+**和「ABI」的关系（先澄清用语）**
+
+- 本目录下是 **`.sol` 的 `interface` 声明**，不是名为 `*.abi` 的 JSON 文件。
+- **ABI（Application Binary Interface）** 描述合约对外可调函数与事件的编码规则；用 Solidity 编译器编译合约或接口时，都会产出 **ABI JSON**（供前端、脚本、`ethers`/`viem` 等使用）。
+- **链上**：其它合约通过 `import` 接口并 `IUniswapV2Pair(addr).swap(...)` 等方式调用，编译器用接口做类型检查并生成 **external call**。
+- **链下**：需要部署地址 + **编译得到的 ABI JSON** 才能构造交易；本仓库 **根目录 `interfaces/` 不包含** 这些 JSON，一般在 Hardhat/Foundry 编译产物的 `artifacts/` 里，或由区块浏览器导出。
+
+**本目录各文件职责（与 Uniswap V2 官方接口一致）**
+
+| 文件 | 作用 |
+|------|------|
+| [`IUniswapV2Pair.sol`](interfaces/IUniswapV2Pair.sol) | Pair：储备、`swap`/`mint`/`burn`、累计价格、`permit` 等 |
+| [`IUniswapV2Factory.sol`](interfaces/IUniswapV2Factory.sol) | Factory：`createPair`、`getPair`、`feeTo` 等 |
+| [`IUniswapV2ERC20.sol`](interfaces/IUniswapV2ERC20.sol) | LP Token 的 ERC20 + `permit` |
+| [`IUniswapV2Callee.sol`](interfaces/IUniswapV2Callee.sol) | 闪电贷回调 `uniswapV2Call` |
+| [`IERC20.sol`](interfaces/IERC20.sol) | 最小 ERC20，供 Pair 内 `transfer` 调用 |
+
+**在本仓库里谁 `import` 了根目录 `interfaces/`？**
+
+- **[`UniswapV2Pair.sol`](UniswapV2Pair.sol)**：`IUniswapV2Pair`（实现继承）、`IERC20`、`IUniswapV2Factory`、`IUniswapV2Callee`。
+- **[`UniswapV2ERC20.sol`](UniswapV2ERC20.sol)**：`IUniswapV2ERC20`（LP ERC20 实现继承）。
+
+**未使用根目录 `interfaces/`、但「语义相同」的情况（避免重复找文件）**
+
+- **[`UniswapV2Factory.sol`](UniswapV2Factory.sol)**、**[`UniswapV2Router02.sol`](UniswapV2Router02.sol)**：为 **扁平化单文件**（常见于浏览器验证），把同名 `interface` **全文拷在文件开头**，不单独 `import ./interfaces/`。
+- **`masterchefv2/StakingRewards.sol`**、**`vaultsv2/SingleStakingRewards*.sol`**：仅在 `stakeWithPermit` 需要 `permit` 时，在 **文件末尾内联一小段 `interface IUniswapV2ERC20`**，避免对根目录的跨路径依赖。
+- **[`vaultsv2/oCOIN.sol`](vaultsv2/oCOIN.sol)**：通过 **`@uniswap/v2-core`** npm 包引用 `IUniswapV2Pair`，与根目录 [`interfaces/IUniswapV2Pair.sol`](interfaces/IUniswapV2Pair.sol) **接口定义等价**，路径不同。
+
+**小结**：根目录 `interfaces/` 是 **Uniswap V2 核心合约**（Pair / LP ERC20）的 **源码级接口**；**ABI JSON** 来自编译输出，用于链下；全仓库其它模块若只需 `permit`，往往 **内联最小接口** 或依赖 **npm 官方包**。
 
 ### 13.2 `masterchefv2/`
 
@@ -633,6 +665,7 @@ sequenceDiagram
 - 仓库内 **Solidity 版本不统一**：例如 Uniswap 核心多为 **0.5.16**，`masterchefv2` 中 `StakingRewards` 为 **^0.5.16**，`OtcSwap` 为 **^0.8.0**（内嵌 OZ v4 风格片段），`vaultsv2` 部分为 **0.8.12** 等。
 - 部分文件内嵌 **OpenZeppelin** 或大段 **Etherscan 验证用** 扁平化代码；实际部署时常以 npm 依赖为准，学习时以**当前文件内 import 与 pragma** 为准。
 - 根目录 **未发现** `foundry.toml` 或 `hardhat.config.`*：本仓库以**源码阅读**为主；若要 fork 测试需自行初始化 Hardhat/Foundry 工程并引入这些合约。
+- **ABI JSON**：链下调用依赖编译产物中的 ABI；根目录 [`interfaces/`](interfaces/) 为 **Solidity 接口源码**，不是 ABI 文件；二者关系见 **§13.1.1**。
 
 ---
 
