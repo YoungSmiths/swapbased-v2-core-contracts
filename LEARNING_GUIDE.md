@@ -21,14 +21,14 @@
 | **2** | 整体架构 | 分层、数据流图 | **F** 综合 |
 | **3** | 设计思路 | 为何 Chef 网关、奖励与投票 | **C** |
 | **4** | 核心用户流程 | 交易→质押→领奖→投票 | **F** |
-| **5** | Uniswap V2 核心 | CPAMM、Router、TWAP 要点 | **A** |
+| **5** | Uniswap V2 核心 | CPAMM、Router、TWAP 要点 | **A** | 
 | **6** | Vaults v2 要点（速览） | xBASE/oCOIN/单币池提纲 | 预习 **D**；详解见 **§12** |
-| **7** | CoinToken | COIN 权限与场景 | 代币经济 / **E** 特权 |
+| **7** | CoinToken | COIN 权限与场景；**§7.0** 定位、**§7.4** 经济模型与串联 | 代币经济 / **E** 特权 |
 | **8** | BaseToken | BASE 与 COIN 分工；**§8.1.1** 首发+Operator 经济模型 | 同上 |
 | **9** | Chef + Farm | 控权铸币、StakingRewards | **B、C** |
 | **10** | OtcSwap | xBASE→BASE OTC | 与 **§8/§12** 衔接 |
 | **11** | BaseTokenLocker | LP 锁仓与费用 | 工具层 |
-| **12** | Vaults v2（详解） | 与 Chef 衔接、单币池差异 | **D、F1** |
+| **12** | Vaults v2（详解） | 与 Chef 衔接、单币池差异；**§12.5** xBASE、**§12.6** oCOIN 专节 | **D、F1** |
 | **13** | 合约地图 | 按目录速查文件；**§13.1.1** 说明 `interfaces/` 与 ABI | 定位源码 |
 | **14** | Solidity 与依赖 | 版本、扁平化代码 | **E3** |
 | **15** | 学习路径建议 | 推荐阅读顺序 | 与 **§0.3** 一致 |
@@ -170,6 +170,18 @@ flowchart TB
 
 [`CoinToken.sol`](CoinToken.sol) 实现协议内 **COIN** 代币：在 OpenZeppelin 风格 **ERC20 + ERC20Burnable** 基础上，增加 **`minters` 白名单铸造**、**Operator 角色**（救币与维护铸造者）、以及对 **`burnFrom` / `transferFrom` 的显式覆盖**。COIN 通常作为 **流动性挖矿、质押或衍生品（如 oCOIN）路径中的奖励/计价代币**，由经治理接入的合约按经济模型 `mint` 给用户或池子。
 
+### 7.0 COIN 存在的意义（协议定位）
+
+**COIN 在本仓库里承担的是「多入口、可治理的奖励型 ERC20」：通胀出口由 `minters` 白名单分散到多个业务合约（而非单一地址随意铸），与 **BASE**（**§8**）的「单 Operator 控铸 + 首发大额」形成分工。**
+
+| 维度 | 说明 |
+|------|------|
+| **相对 BASE 为何单独要 COIN** | **BASE** 侧重底池、费用、协议级计价与 **Operator 单一铸币权**；**COIN** 则面向 **流动性挖矿、多 Farm、多路径同时结算奖励**——用 **`minters` 映射** 把铸币权拆给 **MasterChef、StakingRewards、其它已接入合约**，便于在不改 BASE 供应规则的前提下，单独设计 **挖矿排放与游戏/衍生品**（如 **oCOIN**）。 |
+| **信任与运维分层** | **Owner** 管 **`transferOperator`**；**Operator** 管 **`setMinters`**（谁可 `mint` / `burnFrom`）与 **`governanceRecoverUnsupported`**（误转杂币救回）。**日常发奖**由已列入白名单的 **Chef / Farm** 调 **`mint`**，无需 Operator 每笔人工操作。 |
+| **销毁与权限** | 任意持有人可 **`burn`** 自减供应；**`burnFrom` 被设为 `onlyMinter`**，避免「仅凭 allowance 即可被第三方销毁他人 COIN」的通用 ERC20 行为，把**代他人销毁**收敛到与白名单铸造者同一信任域（治理/合规场景）。 |
+
+**一句话**：COIN = **面向挖矿与多协议奖励的 COIN 资产** + **`minters` 控制的多点铸币** + **Operator 维护白名单与救币**；与 BASE 的用途与铸币模型不同，常成对出现在同一产品里。
+
 ### 7.1 业务场景与实例
 
 | 场景 | 说明 |
@@ -233,7 +245,62 @@ sequenceDiagram
   C->>To: strayToken.transfer(amt)
 ```
 
-### 7.4 实现与使用注意
+### 7.4 经济模型与核心函数串联
+
+#### 经济模型（供给与角色）
+
+| 项目 | 说明 |
+|------|------|
+| **供给增加** | 仅 **`mint(recipient, amount)`**，且 **`onlyMinter`**。来源通常是 **`MasterChef` / `StakingRewards` 等**在 **`getReward`、`mintRewards`** 路径中按池规则计算额度后代用户接收 COIN。 |
+| **供给减少** | 用户 **`burn(amount)`** 销毁**本人**余额；**`burnFrom(account, amount)`** 仅 **minter** 可调用（需 `account` 对本合约的 allowance），用于治理指定的集中销毁，**非**日常用户路径。 |
+| **谁改铸币权** | **`setMinters(minter, bool)`** 仅 **Operator**；上线新 Farm 或下线旧合约时常要同步增删白名单。 |
+| **与 BASE 对比（速记）** | **BASE**：`mint` **onlyOperator**，部署时一次性大额初始供应（见 **§8**）。**COIN**：`mint` **onlyMinter**，**无**内置「首发百万」逻辑，排放依赖业务合约调用频率与额度。 |
+
+#### 核心函数在实际业务中如何串联
+
+1. **部署**：`constructor` 将 **`minters[msg.sender] = true`**，部署者可先自测 `mint` 或配合脚本做冷启动。  
+2. **接入挖矿**：**Operator** 对 **`setMinters(masterChefOrStaking, true)`**，使奖励结算交易内可 **`CoinToken.mint(user, …)`**；若 Chef 聚合多币奖励，COIN 常是 **`ratios`** 中的一种（见 **§9**）。  
+3. **用户侧持有 COIN 之后**：与其它 ERC20 一样 **`transfer` / `approve` + `transferFrom`**（本合约显式重写 **`transferFrom`**，语义与标准一致）；可去 **AMM 做 LP**、与 **`oCOIN.lock`** 等 **`transferFrom` COIN**、或 **`burn`** 参与通缩/活动。  
+4. **运维**：新池上线 → **加 minter**；退役池 → **`setMinters(old, false)`** 防止旧合约仍可铸币。误向 **本合约地址** 转入**非 COIN** 的 ERC20 → **`governanceRecoverUnsupported`** 转回指定地址。  
+5. **Owner / Operator**：**Owner** 更换 **Operator**（`transferOperator`）；**Operator** 不直接「铸给用户」除非把自己（或某地址）也设为 **minter** 且自行调用 `mint`——通常仍由 **Chef 合约**按规则铸。
+
+#### 端到端用户旅程（总览）
+
+```mermaid
+flowchart TB
+  subgraph deploy [部署与配置]
+    D[部署 CoinToken]
+    Op1[Operator setMinters]
+  end
+  subgraph emission [排放]
+    Chef[MasterChef / Farm]
+    Mint[mint → 用户]
+  end
+  subgraph hold [持有与使用]
+    U[用户 COIN 余额]
+    AMM[AMM swap / 加 LP]
+    oCOIN[oCOIN / 其它协议]
+    Br[burn]
+  end
+  D --> Op1 --> Chef
+  Chef --> Mint --> U
+  U --> AMM
+  U --> oCOIN
+  U --> Br
+```
+
+#### 函数搭配速查表
+
+| 函数 | 典型调用者 | 业务含义 |
+|------|------------|----------|
+| `mint` | `minters` 内合约（Chef、Farm 等） | 奖励发放、排放 |
+| `burn` | 任意持有人 | 自愿销毁 |
+| `burnFrom` | 仅 minter | 代销毁（高权限，非常规） |
+| `setMinters` | Operator | 接入/下线铸币者 |
+| `transfer` / `transferFrom` | 用户、Router、oCOIN 等 | 流通与 DeFi 组合 |
+| `governanceRecoverUnsupported` | Operator | 仅救**其它**代币误转，非日常转 COIN |
+
+### 7.5 实现与使用注意
 
 - **`burnFrom` 权限**：本合约将 `burnFrom` 限制为 **onlyMinter**，与标准 ERC20Burnable「任意 spender 在 allowance 内可销毁」不同，用于降低任意合约经授权销毁他人 COIN 的风险；普通用户销毁自有代币请用 **`burn`**。
 - **`transferFrom`**：显式重写，逻辑与父类一致（先转账再扣 allowance），便于在继承链中固定行为。
@@ -587,6 +654,273 @@ sequenceDiagram
 - **预存型 OtherTokens**：`SingleStakingRewardsOtherTokens` **不会** `mintRewards`，需事先向合约转入足够 **`rewardsToken`**。
 
 更细的 NatSpec 见 [`vaultsv2/xBASE.sol`](vaultsv2/xBASE.sol)、[`vaultsv2/oCOIN.sol`](vaultsv2/oCOIN.sol) 及 `SingleStakingRewards*.sol`。
+
+### 12.5 xBASE 专节：场景、经济模型、`rewardRate` 与函数串联
+
+对应源码：[`vaultsv2/xBASE.sol`](vaultsv2/xBASE.sol)。本节把 **xBASE** 从「一句表」展开为可落地的**业务串联**：谁在什么时机调什么函数、资金与计量如何变化。
+
+#### 12.5.0 xBASE 存在的作用（协议定位）
+
+**xBASE 解决的是：在不动用「直接增发 BASE」的前提下，为协议提供一层可识别、可组合、可治理的「参与凭证」，并把「愿意长期参与 / 归属后再领奖」与现货流通的 BASE 区分开。**
+
+| 维度 | 作用 |
+|------|------|
+| **相对 BASE 的角色** | 用户通过 **`lock`** 将 **BASE 销毁**并 **1:1 换入 xBASE**：链上把「已选择进入协议经济/治理圈」的份额记为 **xBASE**，与仍在 AMM 或钱包里自由流转的 **BASE** 在账户形态上分离；赎回或变现可走其它产品路径（如 **§10** OtcSwap 等），不在此重复。 |
+| **与 MasterChef 的硬绑定** | [`MasterchefV2.sol`](masterchefv2/MasterchefV2.sol) 部署时写入 **`address public xBASE`**；**社区投票**（为池子争取 **`allocPointCommunity`**）使用的 **`getTotalVotePower`** = **`IERC20(xBASE).balanceOf(user)`** + 可选的 **单币质押池**内余额（`countDepositAmountAsVotingPower` 为 true 的 Farm）。因此在本仓库设计里，**xBASE 是 Chef 侧认定的「治理/投票权」代币载体**，而非任意 ERC20 皆可替换。 |
+| **奖励发放网关** | **`vest` / `vestHalf` → `claim`** 将归属计量 **`totalVested`** 交给 **`mintRewards`**，与 **§9** 所述 Chef 多币 **`ratios`** 铸币一致，使「归属结束领奖励」与 Farm 发奖体系同源。 |
+| **运维弹性** | **`mint`（Operator）** 可在 **`lock` 之外**向特定地址分配 xBASE，用于激励、合作与活动，与「用户自带 BASE 换 xBASE」并存。 |
+
+**一句话**：xBASE = **BASE 的衍生参与凭证**（lock 销毁 BASE 换入）+ **Chef 治理投票权计量**（见 `MasterchefV2` 的 `xBASE` 与 `getTotalVotePower`）+ **归属后统一走 `mintRewards` 的领奖入口**。
+
+#### 12.5.1 使用场景（产品侧）
+
+| 场景 | 说明 |
+|------|------|
+| **BASE → xBASE 入口** | 用户持有 **BASE**，希望获得协议内常用的 **xBASE**（例如参与 **MasterChef** 中与 xBASE 相关的 Farm、投票权重、或其它依赖 xBASE 余额/质押的逻辑），走 **`lock`**：BASE 销毁、等量 xBASE 进入用户钱包。 |
+| **延迟释放的「归属 → 领奖」** | 用户持有 xBASE，不立刻想卖或转出，而是愿意 **销毁 xBASE** 并开启一笔 **计时归属**；到期后 **`claim`**，由 **Chef** 按池子 **`ratios`** 铸造奖励（多币种），实现「用时间换奖励计量」的路径。 |
+| **快慢两种归属** | **`vest`**：默认 **30 天**，`totalVested` 等于销毁的 xBASE 数量；**`vestHalf`**：**7 天**，但 `totalVested` 仅为销毁量的一半（`amount * 100 / 200`），适合更短周期、更低领奖计量。 |
+| **运营增发** | **`mint`**（**Operator**）向指定地址增发 xBASE，用于活动、补偿、合作方分配等（与 `lock` 的「用户自带 BASE」不同）。 |
+| **主动通缩** | **`burn`**：用户销毁自己的 xBASE，减少流通量（与 `vest` 中「为开仓位而销毁」语义不同：后者同时写入 `userInfo`）。 |
+
+#### 12.5.2 经济模型（与 BASE / Chef 的关系）
+
+- **`lock`**：用户 **`transferFrom` BASE 到 xBASE 合约 → 合约对 BASE 调用 **`burn`**（底层 BASE 通缩）→ 对用户 **`_mint` 等量 xBASE**。整体上可理解为：**BASE 从流通中移除，xBASE 作为「已锁凭证」1:1 进入用户**。  
+- **`vest` / `vestHalf`**：用户 **`_burn` xBASE**，并在 **`userInfo[msg.sender]`** 追加一条 **`vestPosition`**（`totalVested`、`lastInteractionTime`、`VestPeriod`）。**流通 xBASE 减少**，但 **「待 claim 的计量」记在仓位里**。  
+- **`claim`**：仅当归属时间结束（见 **`remainTime` == 0**），把该 **`id`** 的 **`totalVested`** 作为 **`mintRewards(receiver, amount)`** 的 **`amount`** 交给 **MasterChef**；Chef 再按部署配置把该数量拆成多代币铸造。**领奖金额由仓位里的 `totalVested` 决定，不是按秒乘 `rewardRate` 在 xBASE 内现算。**  
+- **`mint`（Operator）**：无 BASE 进入合约，直接 **`_mint` xBASE**，属于 **协议侧通胀工具**。  
+- **`burn`**：用户 **`_burn` 自己的 xBASE**，无 Chef、无仓位，纯减少余额。
+
+**小结**：xBASE 合约内部**不实现「每秒线性释放」到用户余额**；**时间门槛**只体现在 **`remainTime` / `claim` 是否允许**，**实际铸币数量**是 **`totalVested` 一次性**交给 Chef。
+
+#### 12.5.3 `rewardRate` 的作用（与 `claim` 的关系）
+
+- **写入**：仅 **`setRewardRate(uint256)`**，修饰符 **`onlyMasterChef`**，即由已配置的 **`masterChef`** 合约调用，把 **`rewardRate`** 存成 **公共状态变量**。  
+- **读取**：在 **`xBASE.sol` 源码中，`rewardRate` 未被 `lock` / `vest` / `vestHalf` / `claim` 读取**；`claim` 使用的数量是 **`position.totalVested`**。  
+- **语义**：`rewardRate` 更适合理解为 **Chef 与 xBASE 合约之间的「参数同步 / 镜像」**（例如与全局每秒产出、某池展示、或链下脚本一致），**链上领奖路径以 `totalVested` + `mintRewards` 为准**。若部署侧从未从 Chef 回调 `setRewardRate`，该变量可为 0 且不影响 `claim` 逻辑。
+
+#### 12.5.4 核心函数如何串联（典型用户旅程）
+
+**路径 A：从 BASE 到归属领奖（最常见串联）**
+
+1. 用户持有 **BASE**，`approve` xBASE 合约。  
+2. **`lock(amount)`** → BASE 销毁 + 获得 **`amount` xBASE**。  
+3. （可选）在生态内使用 xBASE（质押、投票等，取决于 Chef 与其它合约配置）。  
+4. 选择 **`vest(x)`** 或 **`vestHalf(x)`** → **销毁 `x` 枚 xBASE**，新开一条 **`userInfo` 仓位**（索引为 **`userPositions - 1`** 或前端遍历的 `id`）。  
+5. 等待 **`vestingPeriod`（30 天）** 或 **`shortVestingPeriod`（7 天）**。  
+6. 前端或脚本用 **`remainTime(address, id)`** 判断是否到期（见下 **实现注意**）。  
+7. **`claim(id)`** → **`masterChef.mintRewards(msg.sender, totalVested)`**，该仓位 **`totalVested` 置 0**。
+
+**路径 B：Operator 与自愿销毁**
+
+- **`mint(recipient, amount)`**：Operator 给某地址加 xBASE；之后该地址仍可走 **vest → claim** 或自行 **`burn`**。  
+- **`burn(amount)`**：仅减少自己余额，**不产生** `userInfo` 仓位。
+
+**对比表**
+
+| 函数 | 谁调用 | BASE | xBASE 余额 | `userInfo` / Chef |
+|------|--------|------|------------|-------------------|
+| `lock` | 用户 | 销毁 | +等量 | 无 |
+| `vest` | 用户 | — | −销毁量 | 新仓位，`totalVested`=销毁量 |
+| `vestHalf` | 用户 | — | −销毁量 | 新仓位，`totalVested`=销毁量的一半 |
+| `claim` | 用户 | — | — | 清该仓位，调 `mintRewards` |
+| `mint` | Operator | — | recipient + | 无 |
+| `burn` | 用户 | — | − | 无 |
+
+#### 12.5.5 交互流程图
+
+**总览（用户视角）**
+
+```mermaid
+flowchart LR
+  subgraph entry [入口]
+    BASE[BASE]
+    L[lock]
+    XB[xBASE 余额]
+  end
+  subgraph vesting [归属]
+    V{vest 或 vestHalf}
+    P[userInfo 仓位]
+  end
+  subgraph exit [领奖]
+    RT[remainTime 到期]
+    CL[claim]
+    MC[MasterChef.mintRewards]
+  end
+  BASE --> L --> XB
+  XB --> V --> P
+  P --> RT --> CL --> MC
+```
+
+**时序（lock → vest → claim）**
+
+```mermaid
+sequenceDiagram
+  participant U as 用户
+  participant B as BASE
+  participant X as xBASE
+  participant C as MasterChef
+  participant T as 奖励代币等
+  U->>B: approve(xBASE, amount)
+  U->>X: lock(amount)
+  X->>B: transferFrom + burn
+  X->>U: mint xBASE 1:1
+  U->>X: vest(amount2) 或 vestHalf(amount2)
+  Note over X: _burn xBASE，push userInfo[id]
+  Note over U: 等待 VestPeriod
+  U->>X: claim(id)
+  X->>X: require remainTime==0
+  X->>C: mintRewards(U, totalVested)
+  C->>T: 按 ratios 多币 mint
+```
+
+**Operator 与 burn（并行关系，非必经）**
+
+```mermaid
+flowchart TB
+  OP[Operator]
+  X2[xBASE]
+  U2[任意用户]
+  OP -->|mint| X2
+  U2 -->|burn 自愿销毁| X2
+```
+
+#### 12.5.6 `remainTime` 与实现注意
+
+- **设计意图**：根据 **`lastInteractionTime`** 与 **`VestPeriod`** 计算**剩余秒数**，到期为 **0**，供 **`claim`** 前检查。  
+- **源码细节**：[`remainTime`](vaultsv2/xBASE.sol) 中 **`timePass`** 使用 **`userInfo[_address][id]`**，而后续比较与返回值使用 **`userInfo[msg.sender][id]`**。调用时应以 **自己为 `msg.sender` 查询本人仓位** 为准，且与 **§12.4** 一致：**跨用户 / 只看 `_address` 可能不符合直觉**，前端务必在目标链上验证只读结果。
+
+### 12.6 oCOIN 专节：场景、经济模型、`rewardRate` 与函数串联
+
+对应源码：[`vaultsv2/oCOIN.sol`](vaultsv2/oCOIN.sol)。oCOIN 与 **§12.5** xBASE 同属「衍生 ERC20 + 归属 + `mintRewards`」族，但底层锚定 **COIN**（非 BASE），并额外支持 **`instantExit`（付 WETH 惩罚、链上询价）** 与更长的 **`vestBond`**。
+
+#### 12.6.0 oCOIN 存在的意义（协议定位）
+
+| 维度 | 说明 |
+|------|------|
+| **相对裸持 COIN** | 用户将 **COIN** 经 **`lock`** 销毁并换入 **oCOIN**，把「参与包装层规则」的份额与钱包里直接交易的 COIN 区分开；适合设计 **更长锁期、即时退出罚金、多币奖励出口（Chef）** 而不必改动 **[`CoinToken`](CoinToken.sol)** 主合约逻辑。 |
+| **与 xBASE 的平行角色** | **xBASE** 锚定 **BASE** + 投票权（**§12.5.0**）；**oCOIN** 锚定 **COIN**，侧重 **奖励型 / 期权式归属** 与 **WETH 罚金退出**，二者都通过 **`claim` / `instantExit` → `IMasterChef.mintRewards`** 与 **Chef** 对齐。 |
+| **价格与风控** | **`quotePrice`** 支持 **V2 储备价**（`usingLegacyPair` + `uniswapV2Pair`）或 **V3 `observe` + TickMath**（`tokenV3PoolAddress`、`duration`），用于 **`instantExit`** 计算用户应付 **WETH** 数量；部署错误会导致罚金或展示严重偏离预期（与 **§12.4** 一致）。 |
+
+**一句话**：oCOIN = **COIN 的包装与归属载体** + **可选即时退出（WETH 惩罚 + 询价）** + **到期 `claim` 走 Chef**；**Operator** 另可通过 **`minters` + `mint`** 做 oCOIN 侧增发。
+
+#### 12.6.1 使用场景（产品侧）
+
+| 场景 | 说明 |
+|------|------|
+| **COIN → oCOIN 入口** | **`lock`**：用户 **`approve` oCOIN 合约，转入 COIN**，合约 **`burn` COIN** 并 **1:1 铸 oCOIN**（COIN 通缩，oCOIN 进入流通）。 |
+| **耐心归属领奖** | **`vest`**：销毁 oCOIN，开 **60 天** 仓位，`totalVested` = 销毁量；到期 **`claim(id)`** → **`mintRewards`**。 **`vestBond`**：**150 天**，`totalVested` = 销毁量 × **`exitRatioBond` / 100**（默认 **150%** 计量，更长锁、更高领奖基数）。 |
+| **等不及要流动性** | **`instantExit`**（需 **`optionEnabled`**）：销毁全部 `_amount` oCOIN，用户按 **`quotePrice`** 支付 **WETH** 给 **`_operator`**（金额为 **`(100 - exitRatio)%`** 对应的 COIN 名义经询价换算，默认 **`exitRatio = 30`** 即约 **70%** 部分参与罚金计价）；随后 **`mintRewards(msg.sender, exitAmount)`**。 |
+| **运维** | **Owner**：`masterChef`、`weth`、V2/V3 池、`optionEnabled`、`exitRatio` / `exitRatioBond` 等。**Operator**：**`setMinters`**。**Minter**：**`mint`** 增发 oCOIN。 |
+| **自愿销毁** | **`burn`**：减少自有 oCOIN，不产生归属仓位。 |
+
+#### 12.6.2 经济模型（COIN / WETH / Chef）
+
+- **`lock`**：COIN **销毁** + oCOIN **增发**（1:1），COIN 供应下降，oCOIN 代表「已进入包装层的凭证」。  
+- **`vest` / `vestBond`**：oCOIN **销毁**，**`totalVested`** 记入 **`userInfo`**；到期 **`claim`** 一次性把 **`totalVested`** 交给 **`mintRewards`**（与 xBASE 相同：**不由 `rewardRate` 在合约内按秒推算**）。  
+- **`instantExit`**：oCOIN **销毁**；用户支付 **WETH** 给 **Operator**（惩罚/通道费，数额由 **`quotePrice`** 与 **`exitRatio`** 共同决定）；**`mintRewards`** 的计量见下 **§12.6.6**（以链上当前实现为准）。  
+- **`mint`（minter）**：无 COIN 进入本合约，直接 **`_mint` oCOIN**，用于激励或活动。  
+- **`setRewardRate`**：仅 **MasterChef** 可写 **`rewardRate`** 状态变量；**`vest`/`claim`/`instantExit` 路径不读取该字段**（与 **§12.5.3** 同理，属镜像/外围同步用途）。
+
+#### 12.6.3 核心函数如何串联（典型旅程）
+
+**路径 A：COIN → 归属 → 领奖**
+
+1. 用户持有 **COIN**，`approve` **oCOIN** 合约。  
+2. **`lock(amount)`** → COIN 销毁 + **等量 oCOIN**。  
+3. **`vest` 或 `vestBond`** → 销毁 oCOIN，新增 **`userInfo` 仓位**（记 `id`）。  
+4. 等待 **`vestingPeriod`（60 天）** 或 **`bondVestingPeriod`（150 天）**；**`remainTime(msg.sender, id)`** 判到期。  
+5. **`claim(id)`** → **`mintRewards(msg.sender, totalVested)`**。
+
+**路径 B：等不及 → 即时退出**
+
+1. 用户持有 oCOIN，准备足够 **WETH** 并 `approve` 本合约。  
+2. **`instantExit(amount, maxPayAmount)`**（若开启）：销毁 oCOIN，**`transferFrom` WETH** 至 **`_operator`**，再 **`mintRewards`**。  
+3. 用 **`quotePayment(amount)`**（视图）预估应付 WETH，与 **`maxPayAmount`** 配合防滑点。
+
+**路径 C：激励增发**
+
+- **Operator** **`setMinters(addr, true)`** 后，该地址可 **`mint`** oCOIN 给活动参与者，与 **`lock` 用户自带 COIN** 并存。
+
+#### 12.6.4 交互流程图
+
+**总览**
+
+```mermaid
+flowchart TB
+  subgraph in [入口]
+    COIN[COIN]
+    L[lock]
+    OC[oCOIN 余额]
+  end
+  subgraph paths [三条主路径]
+    V[vest / vestBond]
+    IE[instantExit]
+    P[userInfo 仓位]
+  end
+  subgraph out [出口]
+    CL[claim]
+    MC[MasterChef.mintRewards]
+  end
+  COIN --> L --> OC
+  OC --> V --> P
+  OC --> IE
+  P --> CL --> MC
+  IE --> MC
+```
+
+**时序：`lock` → `vest` → `claim`**
+
+```mermaid
+sequenceDiagram
+  participant U as 用户
+  participant CT as COIN
+  participant O as oCOIN
+  participant C as MasterChef
+  U->>CT: approve(oCOIN, amount)
+  U->>O: lock(amount)
+  O->>CT: transferFrom + burn
+  O->>U: mint oCOIN 1:1
+  U->>O: vest(amount2) 或 vestBond(amount2)
+  Note over O: _burn oCOIN，push userInfo[id]
+  Note over U: 等待 VestPeriod
+  U->>O: claim(id)
+  O->>C: mintRewards(U, totalVested)
+```
+
+**时序：`instantExit`**
+
+```mermaid
+sequenceDiagram
+  participant U as 用户
+  participant W as WETH
+  participant O as oCOIN
+  participant Op as _operator
+  participant C as MasterChef
+  U->>W: approve(oCOIN, maxPay)
+  U->>O: instantExit(amount, maxPayAmount)
+  O->>O: _burn oCOIN
+  O->>W: transferFrom U to Op（罚金路径）
+  O->>C: mintRewards(U, exitAmount)
+```
+
+#### 12.6.5 函数搭配速查表
+
+| 函数 | 作用摘要 |
+|------|----------|
+| `lock` | COIN 销毁 → oCOIN 1:1 |
+| `vest` | 60 天归属，`totalVested` = 销毁量 |
+| `vestBond` | 150 天归属，`totalVested` = 销毁量 × `exitRatioBond`/100 |
+| `claim` | 到期，`mintRewards(totalVested)` |
+| `instantExit` | 付 WETH + `mintRewards`（需 `optionEnabled`） |
+| `quotePayment` / `quotePrice` | 视图：罚金与询价 |
+| `mint` / `setMinters` | minter 增发；Operator 配白名单 |
+| `burn` | 用户自毁 oCOIN |
+
+#### 12.6.6 实现与读源码注意
+
+- **`remainTime`**：与 **§12.5.6** 相同结构，**`_address` / `msg.sender` 混用**，请以 **`msg.sender` 本人仓位** 实测。  
+- **`instantExit` 与 `exitRatio`**：用户支付的 WETH 由 **`(100 - exitRatio)%`** 与 **`quotePrice`** 决定；源码中 **`mintRewards` 前将 `exitAmount` 赋值为全额 `_amount`**（中间曾用 `exitRatio * _amount / PRECISION` 的局部变量会被覆盖），**链上实际 `mintRewards` 计量为整笔销毁的 `_amount`**。集成或审计时应以部署版本为准，勿仅依赖注释「30% liquid」字面。  
+- **V2/V3 切换**：**Owner** 配置 **`usingLegacyPair`**、**`uniswapV2Pair`** 或 **`tokenV3PoolAddress`**、**`duration`**，错误会导致 **`quotePrice`** 异常。
 
 ---
 

@@ -12,7 +12,7 @@
 | **A** | Uniswap V2 / AMM | **§5** | `UniswapV2Pair`、`UniswapV2Router02` |
 | **B** | StakingRewards 积分模型 | **§9**、**§3.2** | `masterchefv2/StakingRewards.sol` |
 | **C** | MasterChef / 治理 / 投票 | **§9**、**§3.3～3.4** | `MasterchefV2.sol`、`MasterChefCoin.sol` |
-| **D** | Vaults（xBASE / oCOIN） | **§6（速览）**、**§12（详解）** | `vaultsv2/xBASE.sol`、`oCOIN.sol` |
+| **D** | Vaults（xBASE / oCOIN） | **§6（速览）**、**§12（详解）**、**§12.5（xBASE）**、**§12.6（oCOIN）** | `vaultsv2/xBASE.sol`、`oCOIN.sol` |
 | **E** | 安全与工程 | **§16**、**§14** | 全仓特权面、测试脚手架 |
 | **F** | 综合与对比 | **§2～§4**、**§12** | 跨模块 |
 | **G** | 面试前 5 分钟速查 | **§0.3**、**§15** | — |
@@ -171,7 +171,7 @@
 
 ## D. Vaults（xBASE / oCOIN）
 
-**对应学习指南**：[LEARNING_GUIDE.md](LEARNING_GUIDE.md) **§12**（Vaults 详解）；速览见 **§6**
+**对应学习指南**：[LEARNING_GUIDE.md](LEARNING_GUIDE.md) **§12**（Vaults 详解）、**§12.5**（xBASE）、**§12.6**（oCOIN）；速览见 **§6**
 
 ### D1. `oCOIN` 中 `instantExit` 大致做什么？
 
@@ -259,9 +259,10 @@
 
 | 若被问到 | 精读章节（[LEARNING_GUIDE.md](LEARNING_GUIDE.md)） |
 |----------|----------|
-| COIN 谁可 `mint`、`burnFrom` 为何特殊 | **§7** CoinToken |
+| COIN 定位、`mint`/`minters`、经济模型与函数串联、`burnFrom` 为何特殊 | **§7**（**§7.0、§7.4**）CoinToken |
 | BASE 首发 100 万、后续仅 Operator 增发、适用场景 | **§8**（**§8.1.1** 经济模型） |
 | xBASE→BASE 非 AMM 兑换 | **§10** OtcSwap |
+| oCOIN 定位、`lock`/`vest`/`instantExit`/`claim`、WETH 罚金与询价 | **§12.6** |
 | LP 定时锁仓与费用 | **§11** BaseTokenLocker |
 
 祝面试顺利。
