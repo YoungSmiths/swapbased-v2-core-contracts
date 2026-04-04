@@ -356,35 +356,64 @@ abstract contract Ownable is Context {
     }
 }
 
+/**
+ * @title BaseTokenLocker
+ * @author 基于 Basescan 验证版本扩展注释
+ * @notice 面向项目方/用户的「ERC20 锁仓合约」：将任意 IERC20（常见为 LP Token）存入本合约，约定未来某一时刻由指定地址 `withdrawer` 取回；
+ *         收取两笔费用：① 以 `BaseToken`（如 BASE）支付的固定 `lockFee`；② 从锁仓代币中按 `lpLockFee`（万分比）抽成给 `marketingAddress`。
+ * @dev
+ * - 锁仓记录以自增 `depositsCount` 为 `_id`，`lockedToken[_id]` 存明细；`walletTokenBalance[token][user]` 为记账（与 withdraw 时扣减对应）。
+ * - 部署时硬编码默认 `BaseToken` 地址，Owner 可 `setBaseToken` 更换。
+ * - `lockTokensByBase` 中先 `transferFrom` 全额入合约再拆分手续费：若第二笔对 `_token` 仍使用 `transferFrom(msg.sender, ...)`，调用方需已 approve 足够额度且余额仍覆盖该笔（与具体代币转账模型有关）。
+ */
 contract BaseTokenLocker is Ownable{
     using SafeMath for uint256;
 
+    /// @notice 单笔锁仓记录
     struct Items {
-        IERC20 token;
-        address withdrawer;
-        uint256 amount;
-        uint256 unlockTimestamp;
-        bool withdrawn;
+        IERC20 token;              // 被锁的 ERC20（多为 LP）
+        address withdrawer;        // 到期后唯一可取回地址（可与存入者不同）
+        uint256 amount;            // 扣完 lp 比例手续费后、留在本合约待领取的数量
+        uint256 unlockTimestamp;   // 解锁时间（秒级 Unix 时间戳）
+        bool withdrawn;            // 是否已领取，防双花
     }
 
+    /// @notice 已生成的锁仓笔数，同时作为新记录的 id
     uint256 public depositsCount;
+    /// @notice 某代币合约地址 -> 该代币下所有锁仓 id 列表（索引用）
     mapping (address => uint256[]) private depositsByTokenAddress;
+    /// @notice 某 `withdrawer` 地址 -> 其作为领取人的所有锁仓 id 列表
     mapping (address => uint256[]) public depositsByWithdrawer;
+    /// @notice 锁仓 id -> 明细
     mapping (uint256 => Items) public lockedToken;
+    /// @notice token 地址 -> 用户地址 -> 该用户在本合约中的「记账余额」（与单笔 lock 的 amount 累计一致，withdraw 时扣减）
     mapping (address => mapping(address => uint256)) public walletTokenBalance;
 
+    /// @notice 用于支付固定锁仓费的代币（如 BASE），默认地址可经 Owner 修改
     IERC20 public BaseToken = IERC20(0xd07379a755A8f11B57610154861D694b2A0f615a);
-    uint256 public lockFee = 100000 ether; // 100,000 BASE
+    /// @notice 每次锁仓需向 marketing 支付的 BaseToken 数量（默认 100_000 * 10^18 量级，取决于代币 decimals）
+    uint256 public lockFee = 100000 ether; // 100,000 BASE（命名 ether 仅作 18 位习惯）
+    /// @notice 从锁仓代币中抽取的比例，万分比（50 = 0.5%）
     uint256 public lpLockFee = 50; // 0.5%
+    /// @notice 接收 BASE 固定费与 LP 比例费的营销/协议地址
     address public marketingAddress;
 
     event Withdraw(address withdrawer, uint256 amount);
     event Lock(address token, uint256 amount, uint256 id);
 
+    /// @notice 部署时将 `marketingAddress` 设为部署者，后续可由 Owner 修改
     constructor() {
         marketingAddress = msg.sender;
     }
 
+    /**
+     * @notice 锁仓：调用者支付 BaseToken 固定费 + 授权并转入待锁 `_token`，扣减 LP 比例费后剩余记入 `_id` 记录，到期由 `_withdrawer` 领取。
+     * @param _token 要锁定的 ERC20 合约（须先 approve 本合约至少 `_amount`）
+     * @param _withdrawer 解锁后有权 `withdrawTokens` 的地址（团队多签、金库或本人均可）
+     * @param _amount 希望锁入的代币数量（若代币有转账税，实际入账以合约余额差为准）
+     * @param _unlockTimestamp 解锁时间戳（秒），须大于当前区块时间且为秒（< 1e10 的启发式校验）
+     * @return _id 本笔锁仓的唯一编号，供前端展示与后续 `withdrawTokens` 使用
+     */
     function lockTokensByBase(IERC20 _token, address _withdrawer, uint256 _amount, uint256 _unlockTimestamp) external returns (uint256 _id) {
         require(_amount > 0, 'Token amount too low!');
         require(_unlockTimestamp < 10000000000, 'Unlock timestamp is not in seconds!');
@@ -392,17 +421,22 @@ contract BaseTokenLocker is Ownable{
         require(_token.allowance(msg.sender, address(this)) >= _amount, 'Approve tokens first!');
         require(BaseToken.balanceOf(msg.sender) >= lockFee, "Need to pay lock fee!");
 
+        // 实际入账数量（兼容通缩/费代币：以合约余额差为准）
         uint256 beforeDeposit = _token.balanceOf(address(this));
         _token.transferFrom(msg.sender, address(this), _amount);
         uint256 afterDeposit = _token.balanceOf(address(this));
 
         _amount = afterDeposit.sub(beforeDeposit);
+        // LP 手续费：从本笔入账中切出万分比给营销地址
         uint256 _lpLockFeeAmount = _amount.mul(lpLockFee).div(10000);
         uint256 _amountSubFee = _amount.sub(_lpLockFeeAmount);
 
+        // 固定费：BASE（或当前 BaseToken）从用户转至 marketing
         BaseToken.transferFrom(msg.sender, marketingAddress, lockFee);
+        // 将 LP 手续费部分从用户转至 marketing（若代币已全额进入本合约，需保证 approve/余额模型与代币一致）
         _token.transferFrom(msg.sender, marketingAddress, _lpLockFeeAmount);
 
+        // 记账：剩余部分记在给「存入者」名下（withdraw 时由 withdrawer 扣减同一 token 下余额）
         walletTokenBalance[address(_token)][msg.sender] = walletTokenBalance[address(_token)][msg.sender].add(_amountSubFee);
 
         _id = ++depositsCount;
@@ -420,6 +454,10 @@ contract BaseTokenLocker is Ownable{
         return _id;
     }
 
+    /**
+     * @notice 到期后由记录的 `withdrawer` 取回该笔剩余代币。
+     * @param _id `lockTokensByBase` 返回的锁仓编号
+     */
     function withdrawTokens(uint256 _id) external {
         require(block.timestamp >= lockedToken[_id].unlockTimestamp, 'Tokens are still locked!');
         require(msg.sender == lockedToken[_id].withdrawer, 'You are not the withdrawer!');
@@ -427,37 +465,52 @@ contract BaseTokenLocker is Ownable{
 
         lockedToken[_id].withdrawn = true;
 
+        // 从「当前调用者（withdrawer）」名下扣减记账；lock 时记在「存入者」名下，若二者不同可能导致 SafeMath 下溢——业务上应保证 withdrawer 与存入者一致或另行约定
         walletTokenBalance[address(lockedToken[_id].token)][msg.sender] = walletTokenBalance[address(lockedToken[_id].token)][msg.sender].sub(lockedToken[_id].amount);
 
         emit Withdraw(msg.sender, lockedToken[_id].amount);
         lockedToken[_id].token.transfer(msg.sender, lockedToken[_id].amount);
     }
 
+    /// @notice 修改营销收款地址
+    /// @param _marketingAddress 新地址
     function setMarketingAddress(address _marketingAddress) external onlyOwner {
         marketingAddress = _marketingAddress;
     }
 
+    /// @notice 修改固定锁仓费（BaseToken 数量）
+    /// @param _lockFee 新费用数值（含 decimals）
     function setLockFee(uint256 _lockFee) external onlyOwner {
         lockFee = _lockFee;
     }
 
+    /// @notice 修改 LP 锁仓抽成比例（万分比）
+    /// @param _lpLockFee 新比例，如 50 表示 0.5%
     function setLpLockFee(uint256 _lpLockFee) external onlyOwner {
         lpLockFee = _lpLockFee;
     }
 
+    /// @param _token 代币合约地址
+    /// @return 该代币在「按 token 索引的 id 列表」
     function getDepositsByTokenAddress(address _token) view external returns (uint256[] memory) {
         return depositsByTokenAddress[_token];
     }
 
+    /// @param _withdrawer 领取人地址
+    /// @return 该地址作为 withdrawer 的所有锁仓 id
     function getDepositsByWithdrawer(address _withdrawer) view external returns (uint256[] memory) {
         return depositsByWithdrawer[_withdrawer];
     }
 
-
+    /// @notice 本合约持有的某 ERC20 余额（近似于该 token 锁仓总量，若仅有本合约用途）
+    /// @param _token 代币合约地址
+    /// @return 合约 `balanceOf` 读数
     function getTokenTotalLockedBalance(address _token) view external returns (uint256) {
         return IERC20(_token).balanceOf(address(this));
     }
 
+    /// @notice 更换用于支付固定锁仓费的 BaseToken 地址
+    /// @param _token 新 IERC20
     function setBaseToken(IERC20 _token) external onlyOwner {
         BaseToken = _token;
     }

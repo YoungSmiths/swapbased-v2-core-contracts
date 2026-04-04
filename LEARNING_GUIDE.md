@@ -110,9 +110,76 @@ flowchart TB
 
 ---
 
-## 7. 合约地图（按文件）
+## 7. BaseTokenLocker
 
-### 7.1 根目录
+[`BaseTokenLocker.sol`](BaseTokenLocker.sol) 提供 **任意 ERC20（常见为 Uniswap V2 风格 LP Token）的定时锁仓**：用户将代币转入合约并约定 **解锁时间** 与 **领取地址 `withdrawer`**，协议按 **BaseToken 固定费** + **锁仓代币万分比抽成** 向营销地址收费。适用于「团队/做市方承诺一段时间内不抛售 LP」等透明展示场景。
+
+### 7.1 业务场景与实例
+
+| 场景 | 说明 |
+|------|------|
+| **LP 锁仓背书** | 项目方将 **BASE/ETH** 等池子的 **LP Token** 锁入合约 6～12 个月，向社区证明短期内不会撤池砸盘；解锁后由指定多签地址取回 LP。 |
+| **融资/合作条款** | 投资方要求创始人将部分 **项目代币或 LP** 锁至 **TGE 后某时间**，`withdrawer` 设为团队多签，到期再领取。 |
+| **收费模型** | 每次锁仓需额外支付 **`lockFee` 数量的 BASE**（可 Owner 调整），并从本笔锁仓代币中扣 **`lpLockFee`（万分比）** 给 `marketingAddress`，用于协议运营或营销。 |
+
+**简例**：某用户在 Base 上为 SwapBased 池子添加流动性后得到 **100 枚 LP**；团队承诺锁仓 180 天。用户调用 `lockTokensByBase(LP_TOKEN, teamMultisig, 100e18, unlockTs)`，先 **approve** LP 与 BASE，合约扣除 0.5% LP 与 10 万枚 BASE 级固定费（具体以部署参数为准）后，将剩余 LP 记在合约内；180 天后 **`teamMultisig`** 调用 `withdrawTokens(id)` 取回。
+
+### 7.2 架构图（角色与资金）
+
+```mermaid
+flowchart TB
+  subgraph users [用户与协议]
+    User[锁仓发起用户]
+    Withdrawer[withdrawer领取人]
+    Marketing[marketingAddress]
+  end
+  subgraph locker [BaseTokenLocker]
+    Core[合约托管LP等ERC20]
+  end
+  BaseToken[BaseToken支付固定费]
+  LP[被锁ERC20如LP]
+  User -->|transferFrom LP| Core
+  User -->|transferFrom BaseToken 固定费| Marketing
+  User -->|LP手续费比例| Marketing
+  Core -->|unlock后 transfer| Withdrawer
+```
+
+### 7.3 交互流程图（锁仓与解锁）
+
+```mermaid
+sequenceDiagram
+  participant U as 用户
+  participant L as BaseTokenLocker
+  participant T as ERC20_LP
+  participant B as BaseToken
+  participant M as marketingAddress
+  U->>T: approve(locker, amount)
+  U->>B: approve(locker, lockFee)
+  U->>L: lockTokensByBase(token, withdrawer, amount, unlockTs)
+  L->>T: transferFrom U to L
+  L->>B: transferFrom U to M
+  L->>T: transferFrom U to M LP手续费部分
+  Note over L: 写入 lockedToken[id]，emit Lock
+  Note over U,M: 到期且未withdrawn
+  participant W as withdrawer
+  W->>L: withdrawTokens(id)
+  L->>W: transfer LP 剩余数量
+```
+
+### 7.4 实现与使用注意
+
+- **索引**：`depositsByWithdrawer`、`getDepositsByTokenAddress` 便于前端按人/按代币列出全部 `id`。
+- **`walletTokenBalance`**：在 `lock` 时增加 **存入者** 名下余额，在 `withdraw` 时从 **领取者 `msg.sender`** 名下扣减；若 **`withdrawer` 与存入者不同**，需自行核对是否与业务预期一致（链上原逻辑以源码为准）。
+- **费用参数**：`lockFee` / `lpLockFee` / `BaseToken` / `marketingAddress` 均可由 Owner 配置（见 `setLockFee`、`setLpLockFee`、`setBaseToken`、`setMarketingAddress`）。
+- **链下展示**：锁仓证明通常结合 **区块浏览器 + 本合约事件 `Lock`** 与 **`lockedToken(id)`** 公开读数做页面展示。
+
+更细的函数说明、参数含义与分支注释见源码内 NatSpec。
+
+---
+
+## 8. 合约地图（按文件）
+
+### 8.1 根目录
 
 
 | 文件                                                                  | 职责简述                                  |
@@ -129,7 +196,7 @@ flowchart TB
 | `[helpers/](helpers/)`                                              | `Ownable`、`Context`、`ReentrancyGuard` |
 
 
-### 7.2 `masterchefv2/`
+### 8.2 `masterchefv2/`
 
 
 | 文件                                                                    | 职责简述                                             |
@@ -142,7 +209,7 @@ flowchart TB
 | `[Lottery.sol](masterchefv2/Lottery.sol)`                             | 抽奖类合约                                            |
 
 
-### 7.3 `vaultsv2/`
+### 8.3 `vaultsv2/`
 
 
 | 文件                                                                                      | 职责简述                          |
@@ -154,7 +221,7 @@ flowchart TB
 | `[farms.json](vaultsv2/farms.json)`                                                     | 前端/运营用农场列表元数据（**非链上配置**）      |
 
 
-### 7.4 其它
+### 8.4 其它
 
 
 | 文件                                 | 职责简述                                      |
@@ -165,7 +232,7 @@ flowchart TB
 
 ---
 
-## 8. Solidity 版本与依赖说明
+## 9. Solidity 版本与依赖说明
 
 - 仓库内 **Solidity 版本不统一**：例如 Uniswap 核心多为 **0.5.16**，`masterchefv2` 中 `StakingRewards` 为 **^0.5.16**，`vaultsv2` 部分为 **0.8.12** 等。
 - 部分文件内嵌 **OpenZeppelin** 或大段 **Etherscan 验证用** 扁平化代码；实际部署时常以 npm 依赖为准，学习时以**当前文件内 import 与 pragma** 为准。
@@ -173,17 +240,18 @@ flowchart TB
 
 ---
 
-## 9. 学习路径建议
+## 10. 学习路径建议
 
 1. 读 `UniswapV2Pair` 的 `swap` / `mint` / `burn` 与 `lock` 修饰器，理解重入保护与余额检查。
 2. 读 `StakingRewards` 的 `rewardPerToken`、`earned`、`updateReward`、`getReward`。
 3. 读 `MasterchefV2` 的 `mintRewards`、`_updatePool`、`votePool` 与 Owner 管理函数。
 4. 对照 `vaultsv2` 中 `oCOIN` / `xBASE` 与 MasterChef 的交互。
-5. 用 `[INTERVIEW_PREP.md](INTERVIEW_PREP.md)` 做闭卷问答，回到源码标出行号加深记忆。
+5. 阅读 `BaseTokenLocker` 的锁仓/解锁与费用逻辑（见上文第 7 节）。
+6. 用 `[INTERVIEW_PREP.md](INTERVIEW_PREP.md)` 做闭卷问答，回到源码标出行号加深记忆。
 
 ---
 
-## 10. 诚实边界
+## 11. 诚实边界
 
 - 链上部署地址、具体代币经济参数、Owner 多签情况需以**目标网络**的区块浏览器为准。
 - 未附带完整测试套件时，**数学边界、权限组合**应以形式化审查或自建测试为准；本指南不替代安全审计。
