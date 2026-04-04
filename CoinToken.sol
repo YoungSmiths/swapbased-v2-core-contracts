@@ -956,33 +956,50 @@ abstract contract Ownable is Context {
 pragma solidity 0.6.12;
 
 
+/**
+ * @title Operator
+ * @notice 在 Ownable 之上增加独立 Operator 角色：Owner 可更换 Operator，用于日常运维与救币等操作。
+ * @dev 与 `onlyOwner` 分离，便于多签 Owner 将高频操作委托给单一 Operator 地址。
+ */
 contract Operator is Context, Ownable {
     address private _operator;
 
     event OperatorTransferred(address indexed previousOperator, address indexed newOperator);
 
+    /// @notice 部署时将部署者设为初始 Operator。
     constructor() internal {
         _operator = _msgSender();
         emit OperatorTransferred(address(0), _operator);
     }
 
+    /// @return 当前 Operator 地址。
     function operator() public view returns (address) {
         return _operator;
     }
 
+    /// @notice 仅允许当前 Operator 调用。
     modifier onlyOperator() {
         require(_operator == msg.sender, "operator: caller is not the operator");
         _;
     }
 
+    /// @return 若 `msg.sender` 为 Operator 则返回 true。
     function isOperator() public view returns (bool) {
         return _msgSender() == _operator;
     }
 
+    /**
+     * @notice Owner 将 Operator 权限转移给新地址。
+     * @param newOperator_ 新 Operator，不可为零地址。
+     */
     function transferOperator(address newOperator_) public onlyOwner {
         _transferOperator(newOperator_);
     }
 
+    /**
+     * @dev 内部更新 `_operator` 并发出事件（事件参数沿用既有实现）。
+     * @param newOperator_ 新 Operator 地址。
+     */
     function _transferOperator(address newOperator_) internal {
         require(newOperator_ != address(0), "operator: zero address given for new operator");
         emit OperatorTransferred(address(0), newOperator_);
@@ -990,30 +1007,45 @@ contract Operator is Context, Ownable {
     }
 }
 
+/**
+ * @title CoinToken
+ * @notice 协议内 COIN 奖励代币：标准 ERC20、支持销毁与 Operator 治理；**仅白名单地址可增发（mint）**。
+ * @dev
+ * - 继承 `ERC20Burnable`：任意持有人可 `burn` 销毁自有代币；`burnFrom` 在本合约中被限制为 **onlyMinter**（与常见 OpenZeppelin 行为不同，避免仅凭 allowance 由第三方大规模销毁他人余额）。
+ * - 继承 `Operator`：`governanceRecoverUnsupported` 与 `setMinters` 由 Operator 执行。
+ * - 构造函数将 `minters[msg.sender] = true`，部署者即为首批铸造者。
+ * - `transferFrom` 显式重写：先转账再扣减授权，语义与父类 ERC20 一致。
+ */
 contract CoinToken is ERC20Burnable, Operator {
     using SafeMath8 for uint8;
     using SafeMath for uint256;
 
+    /// @notice 铸造白名单：`minters[addr] == true` 的地址可调用 `mint`；由 Operator 通过 `setMinters` 维护。
     mapping(address => bool) public minters;
+
     /**
-     * @notice Constructs the COIN ERC-20 contract.
+     * @notice 部署 COIN，名称与符号为 "Coin Token" / "COIN"，小数位默认 18（ERC20 构造函数内 `_decimals = 18`）。
+     * @dev 将部署者加入 `minters`，部署完成后即可向任意地址 `mint`（受业务侧接入约束）。
      */
     constructor() public ERC20("Coin Token", "COIN") {
         minters[msg.sender] = true;
     }
 
+    /// @notice 修饰器：仅允许 `minters[msg.sender] == true` 的地址。
     modifier onlyMinter() {
         require(minters[msg.sender] == true, "Only minters allowed");
         _;
     }
 
     /**
-     * @notice Operator mints COIN to a recipient
-     * @param recipient_ The address of recipient
-     * @param amount_ The amount of COIN to mint to
-     * @return whether the process has been done
+     * @notice 向指定地址增发 COIN（通胀入口，权限敏感）。
+     * @param recipient_ 接收铸造代币的钱包或合约地址。
+     * @param amount_ 铸造数量（最小单位，通常为 wei 精度）。
+     * @return 若接收者余额在铸币后大于铸币前则返回 true；正常路径下为 true。
+     * @dev 内部调用 `_mint` 增加 `_totalSupply` 与 `_balances[recipient_]`；仅 minter 可调用。
      */
     function mint(address recipient_, uint256 amount_) public onlyMinter returns (bool) {
+        // 铸币前后对比余额，作为成功断言（与仅依赖 _mint 不 revert 的语义一致）
         uint256 balanceBefore = balanceOf(recipient_);
         _mint(recipient_, amount_);
         uint256 balanceAfter = balanceOf(recipient_);
@@ -1021,14 +1053,33 @@ contract CoinToken is ERC20Burnable, Operator {
         return balanceAfter > balanceBefore;
     }
 
+    /**
+     * @notice 销毁调用者本人账户中的 COIN。
+     * @param amount 销毁数量（最小单位）。
+     * @dev 无 minter 限制，与 `burnFrom` 权限模型不同。
+     */
     function burn(uint256 amount) public override {
         super.burn(amount);
     }
 
+    /**
+     * @notice 从 `account` 扣款并销毁 COIN（需本合约对 `account` 代币的 allowance 足够）。
+     * @param account 被扣减余额并销毁的账户。
+     * @param amount 销毁数量。
+     * @dev 覆盖父类并增加 **onlyMinter**：仅白名单铸造者可执行他人账户的 burnFrom，用于治理/合规场景下集中销毁。
+     */
     function burnFrom(address account, uint256 amount) public override onlyMinter {
         super.burnFrom(account, amount);
     }
 
+    /**
+     * @notice 使用授权额度将代币从 `sender` 转至 `recipient`。
+     * @param sender 代币转出方（须已 `approve` 给 `msg.sender` 足够额度）。
+     * @param recipient 代币接收方。
+     * @param amount 转账数量。
+     * @return 恒为 true（失败时整笔交易 revert）。
+     * @dev 先 `_transfer` 再按差额更新 allowance；与 IERC20 对 transferFrom 的语义一致。
+     */
     function transferFrom(
         address sender,
         address recipient,
@@ -1040,6 +1091,13 @@ contract CoinToken is ERC20Burnable, Operator {
         return true;
     }
 
+    /**
+     * @notice Operator 将本合约地址上误收的 **其他** ERC20 资产转出（救币）。
+     * @param _token 要转出的 IERC20 合约实例（通常为误转入本合约的杂币）。
+     * @param _amount 转出数量。
+     * @param _to 接收方地址。
+     * @dev 仅 Operator；依赖治理不作恶，不应作为日常转移用户 COIN 的通道。
+     */
     function governanceRecoverUnsupported(
         IERC20 _token,
         uint256 _amount,
@@ -1048,6 +1106,12 @@ contract CoinToken is ERC20Burnable, Operator {
         _token.transfer(_to, _amount);
     }
 
+    /**
+     * @notice 授予或撤销某地址的铸造权限。
+     * @param _minter 被配置的地址（常为 MasterChef、Farm、质押合约等）。
+     * @param _canMint true 允许 `mint`，false 移出白名单。
+     * @dev 仅 Operator；撤销后该地址无法再增发 COIN。
+     */
     function setMinters(address _minter, bool _canMint) public onlyOperator {
         minters[_minter] = _canMint;
     }

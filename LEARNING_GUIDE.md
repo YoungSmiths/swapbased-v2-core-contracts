@@ -110,11 +110,89 @@ flowchart TB
 
 ---
 
-## 7. BaseTokenLocker
+## 7. CoinToken
+
+[`CoinToken.sol`](CoinToken.sol) 实现协议内 **COIN** 代币：在 OpenZeppelin 风格 **ERC20 + ERC20Burnable** 基础上，增加 **`minters` 白名单铸造**、**Operator 角色**（救币与维护铸造者）、以及对 **`burnFrom` / `transferFrom` 的显式覆盖**。COIN 通常作为 **流动性挖矿、质押或衍生品（如 oCOIN）路径中的奖励/计价代币**，由经治理接入的合约按经济模型 `mint` 给用户或池子。
+
+### 7.1 业务场景与实例
+
+| 场景 | 说明 |
+|------|------|
+| **Farm 奖励** | `MasterChefCoin` 等将本合约地址配置为奖励代币之一，并把 Chef 合约（或路由合约）加入 `minters`；用户 `getReward` 时由 Chef 调用 `coinToken.mint(user, amount)` 发放 COIN。 |
+| **用户主动销毁** | 用户持有 COIN 后可调用 `burn`，减少流通量（通缩或游戏化销毁）。 |
+| **oCOIN 等衍生品** | 如 [`vaultsv2/oCOIN.sol`](vaultsv2/oCOIN.sol) 中用户锁仓/操作会 `IERC20(coinToken).transferFrom` 或 `burn`，COIN 与包装代币形成闭环。 |
+| **误转救回** | 用户若向 `CoinToken` 合约地址误转 **其它 ERC20**，Operator 可调用 `governanceRecoverUnsupported` 将误转代币转回指定多签或用户地址（**不**用于随意划走用户正常业务中的 COIN）。 |
+
+**简例**：团队在 Base 上部署 `CoinToken`，部署者成为首个 `minter`；随后 Operator 执行 `setMinters(masterChefAddress, true)`，使 Farm 仅在奖励结算时增发 COIN。用户将 COIN 与 ETH 在 AMM 加池做 LP，再将 LP 质押到 `StakingRewards`，领取时收到 COIN 奖励并可在前端选择部分 `burn` 或参与 oCOIN 锁仓。
+
+### 7.2 架构图（角色与权限）
+
+```mermaid
+flowchart TB
+  subgraph roles [链上角色]
+    Owner[Ownable.owner]
+    Op[Operator]
+    Minter[minters 白名单]
+    User[普通持有人]
+  end
+  subgraph coin [CoinToken]
+    Mint[mint 增发]
+    Burn[burn 自毁]
+    BurnFrom[burnFrom 仅 minter]
+    Recover[governanceRecoverUnsupported]
+    SetM[setMinters]
+  end
+  Owner -->|transferOperator| Op
+  Op --> Recover
+  Op --> SetM
+  Minter --> Mint
+  Minter --> BurnFrom
+  User --> Burn
+```
+
+### 7.3 交互流程图
+
+**铸造（典型奖励发放）**
+
+```mermaid
+sequenceDiagram
+  participant MC as MasterChef等已授权minter
+  participant C as CoinToken
+  participant U as 用户地址
+  MC->>C: mint(U, amount)
+  Note over C: onlyMinter；_mint 增加总供给与 U 余额
+  C-->>MC: emit Transfer(0, U, amount)
+```
+
+**Operator 维护铸造者与救币**
+
+```mermaid
+sequenceDiagram
+  participant Op as Operator
+  participant C as CoinToken
+  participant To as 接收地址
+  Op->>C: setMinters(newMinter, true)
+  Note over C: minters[newMinter]=true
+  Op->>C: governanceRecoverUnsupported strayToken, amt, To
+  C->>To: strayToken.transfer(amt)
+```
+
+### 7.4 实现与使用注意
+
+- **`burnFrom` 权限**：本合约将 `burnFrom` 限制为 **onlyMinter**，与标准 ERC20Burnable「任意 spender 在 allowance 内可销毁」不同，用于降低任意合约经授权销毁他人 COIN 的风险；普通用户销毁自有代币请用 **`burn`**。
+- **`transferFrom`**：显式重写，逻辑与父类一致（先转账再扣 allowance），便于在继承链中固定行为。
+- **Operator 信任假设**：`governanceRecoverUnsupported` 可转走本合约持有的任意 IERC20，需链下治理与多签约束 Operator。
+- **与 Chef 的配合**：实际部署时需将负责 `mintRewards` 的合约加入 `minters`，否则奖励交易会在 `mint` 处 revert。
+
+更细的 NatSpec 与参数说明见 [`CoinToken.sol`](CoinToken.sol) 内注释。
+
+---
+
+## 8. BaseTokenLocker
 
 [`BaseTokenLocker.sol`](BaseTokenLocker.sol) 提供 **任意 ERC20（常见为 Uniswap V2 风格 LP Token）的定时锁仓**：用户将代币转入合约并约定 **解锁时间** 与 **领取地址 `withdrawer`**，协议按 **BaseToken 固定费** + **锁仓代币万分比抽成** 向营销地址收费。适用于「团队/做市方承诺一段时间内不抛售 LP」等透明展示场景。
 
-### 7.1 业务场景与实例
+### 8.1 业务场景与实例
 
 | 场景 | 说明 |
 |------|------|
@@ -124,7 +202,7 @@ flowchart TB
 
 **简例**：某用户在 Base 上为 SwapBased 池子添加流动性后得到 **100 枚 LP**；团队承诺锁仓 180 天。用户调用 `lockTokensByBase(LP_TOKEN, teamMultisig, 100e18, unlockTs)`，先 **approve** LP 与 BASE，合约扣除 0.5% LP 与 10 万枚 BASE 级固定费（具体以部署参数为准）后，将剩余 LP 记在合约内；180 天后 **`teamMultisig`** 调用 `withdrawTokens(id)` 取回。
 
-### 7.2 架构图（角色与资金）
+### 8.2 架构图（角色与资金）
 
 ```mermaid
 flowchart TB
@@ -144,7 +222,7 @@ flowchart TB
   Core -->|unlock后 transfer| Withdrawer
 ```
 
-### 7.3 交互流程图（锁仓与解锁）
+### 8.3 交互流程图（锁仓与解锁）
 
 ```mermaid
 sequenceDiagram
@@ -166,7 +244,7 @@ sequenceDiagram
   L->>W: transfer LP 剩余数量
 ```
 
-### 7.4 实现与使用注意
+### 8.4 实现与使用注意
 
 - **索引**：`depositsByWithdrawer`、`getDepositsByTokenAddress` 便于前端按人/按代币列出全部 `id`。
 - **`walletTokenBalance`**：在 `lock` 时增加 **存入者** 名下余额，在 `withdraw` 时从 **领取者 `msg.sender`** 名下扣减；若 **`withdrawer` 与存入者不同**，需自行核对是否与业务预期一致（链上原逻辑以源码为准）。
@@ -177,9 +255,9 @@ sequenceDiagram
 
 ---
 
-## 8. 合约地图（按文件）
+## 9. 合约地图（按文件）
 
-### 8.1 根目录
+### 9.1 根目录
 
 
 | 文件                                                                  | 职责简述                                  |
@@ -196,7 +274,7 @@ sequenceDiagram
 | `[helpers/](helpers/)`                                              | `Ownable`、`Context`、`ReentrancyGuard` |
 
 
-### 8.2 `masterchefv2/`
+### 9.2 `masterchefv2/`
 
 
 | 文件                                                                    | 职责简述                                             |
@@ -209,7 +287,7 @@ sequenceDiagram
 | `[Lottery.sol](masterchefv2/Lottery.sol)`                             | 抽奖类合约                                            |
 
 
-### 8.3 `vaultsv2/`
+### 9.3 `vaultsv2/`
 
 
 | 文件                                                                                      | 职责简述                          |
@@ -221,7 +299,7 @@ sequenceDiagram
 | `[farms.json](vaultsv2/farms.json)`                                                     | 前端/运营用农场列表元数据（**非链上配置**）      |
 
 
-### 8.4 其它
+### 9.4 其它
 
 
 | 文件                                 | 职责简述                                      |
@@ -232,7 +310,7 @@ sequenceDiagram
 
 ---
 
-## 9. Solidity 版本与依赖说明
+## 10. Solidity 版本与依赖说明
 
 - 仓库内 **Solidity 版本不统一**：例如 Uniswap 核心多为 **0.5.16**，`masterchefv2` 中 `StakingRewards` 为 **^0.5.16**，`vaultsv2` 部分为 **0.8.12** 等。
 - 部分文件内嵌 **OpenZeppelin** 或大段 **Etherscan 验证用** 扁平化代码；实际部署时常以 npm 依赖为准，学习时以**当前文件内 import 与 pragma** 为准。
@@ -240,18 +318,19 @@ sequenceDiagram
 
 ---
 
-## 10. 学习路径建议
+## 11. 学习路径建议
 
 1. 读 `UniswapV2Pair` 的 `swap` / `mint` / `burn` 与 `lock` 修饰器，理解重入保护与余额检查。
 2. 读 `StakingRewards` 的 `rewardPerToken`、`earned`、`updateReward`、`getReward`。
 3. 读 `MasterchefV2` 的 `mintRewards`、`_updatePool`、`votePool` 与 Owner 管理函数。
 4. 对照 `vaultsv2` 中 `oCOIN` / `xBASE` 与 MasterChef 的交互。
-5. 阅读 `BaseTokenLocker` 的锁仓/解锁与费用逻辑（见上文第 7 节）。
-6. 用 `[INTERVIEW_PREP.md](INTERVIEW_PREP.md)` 做闭卷问答，回到源码标出行号加深记忆。
+5. 阅读 `BaseTokenLocker` 的锁仓/解锁与费用逻辑（见上文第 8 节）。
+6. 对照 [`CoinToken.sol`](CoinToken.sol) 与上文第 7 节，理解 `minters` / Operator 与 Farm 奖励的配合。
+7. 用 `[INTERVIEW_PREP.md](INTERVIEW_PREP.md)` 做闭卷问答，回到源码标出行号加深记忆。
 
 ---
 
-## 11. 诚实边界
+## 12. 诚实边界
 
 - 链上部署地址、具体代币经济参数、Owner 多签情况需以**目标网络**的区块浏览器为准。
 - 未附带完整测试套件时，**数学边界、权限组合**应以形式化审查或自建测试为准；本指南不替代安全审计。
