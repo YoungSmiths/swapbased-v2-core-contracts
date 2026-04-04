@@ -276,20 +276,44 @@ interface IERC20 {
 
 pragma solidity ^0.8.0;
 
+/**
+ * @title OtcSwap
+ * @notice 链上 OTC：用户用 **xBASE** 按固定比例换取本合约储备的 **BASE**；用户支付的 xBASE 全部转给 **Owner**（典型用途为回购进国库或多签）。
+ * @dev
+ * - 用户调用 `otcSwap` 前须对本合约 `approve` 足够 **xBASE**；合约内须有足额 **BASE**（由 Owner `supplyBASE` 注入）。
+ * - `swapRate` 为**百分数**（如 35 表示 35%）：用户支付 `amount` 枚 xBASE 时，获得 `amount * swapRate / 100` 枚 BASE（源码中 `baseAmount`）。
+ * - `otcSwap` 使用 `nonReentrant`，避免与 ERC20 钩子组合时的重入风险。
+ * - `totalXBASE` 仅累计经 `otcSwap` 进入 Owner 路径的 xBASE 数量，便于链下统计与对账。
+ */
 contract OtcSwap is Ownable, ReentrancyGuard {
+    /// @notice 用户支付的 ERC20，通常为包装/质押衍生代币 **xBASE**。
     IERC20 public xBASE;
+    /// @notice 本合约储备并兑付给用户的 ERC20，通常为 **BASE**。
     IERC20 public BASE;
+    /// @notice 兑换比例（百分数）：BASE 输出量 = `amount * swapRate / 100`；默认 35；可由 Owner 在 [25, 50] 内调整。
     uint256 public swapRate = 35; // 35%
+    /// @notice 累计已通过 `otcSwap` 从用户侧收取并转给 Owner 的 xBASE 数量（统计字段）。
     uint256 public totalXBASE = 0;
 
+    /**
+     * @notice 部署时固定两种代币地址，不可在链上更改（需重新部署方可换币对）。
+     * @param _xBASE 用户支付的代币合约地址（xBASE）。
+     * @param _BASE 本合约持有并支付给用户的代币合约地址（BASE）。
+     */
     constructor(IERC20 _xBASE, IERC20 _BASE) {
         xBASE = _xBASE;
         BASE = _BASE;
     }
 
+    /**
+     * @notice 用户使用 xBASE 按当前 `swapRate` 兑换 BASE。
+     * @param amount 用户支付的 xBASE 数量（代币最小单位，通常为 wei 精度）。
+     * @dev 核心逻辑：① `transferFrom` 将 `amount` 从用户转至 **owner()**；② `baseAmount = amount * swapRate / 100`；③ 检查本合约 BASE 余额 ≥ `baseAmount`；④ 向用户 `transfer` BASE；⑤ `totalXBASE += amount`。
+     */
     function otcSwap(uint256 amount) public nonReentrant {
         require(xBASE.transferFrom(msg.sender, owner(), amount), "Transfer of xBASE failed");
 
+        // 按百分比例计算应付 BASE；整数除法向下取整
         uint256 baseAmount = amount * swapRate / 100;
         require(BASE.balanceOf(address(this)) >= baseAmount, "Insufficient BASE in contract");
 
@@ -298,15 +322,28 @@ contract OtcSwap is Ownable, ReentrancyGuard {
         totalXBASE += amount;
     }
 
+    /**
+     * @notice Owner 从自有余额向本合约注入 BASE，维持兑付流动性。
+     * @param amount 从 `msg.sender`（Owner）转入本合约的 BASE 数量。
+     */
     function supplyBASE(uint256 amount) public onlyOwner {
         require(BASE.transferFrom(msg.sender, address(this), amount), "Supply of BASE failed");
     }
 
+    /**
+     * @notice Owner 从本合约取回 BASE（例如调整库存或紧急撤出）。
+     * @param amount 取回数量；不得超过本合约当前 BASE 余额。
+     */
     function retrieveBASE(uint256 amount) public onlyOwner {
         require(BASE.balanceOf(address(this)) >= amount, "Insufficient BASE in contract");
         require(BASE.transfer(msg.sender, amount), "Retrieval of BASE failed");
     }
 
+    /**
+     * @notice 调整兑换比例（百分数），影响后续每笔 `otcSwap` 的 BASE 输出。
+     * @param newRate 新比例，必须在 **25～50**（含边界），否则 revert。
+     * @dev 例如设为 40 表示用户每 100 单位 xBASE 换得 40 单位 BASE（在余额充足前提下）。
+     */
     function changeSwapRate(uint256 newRate) public onlyOwner {
         require(newRate >= 25 && newRate <= 50, "Swap rate out of range");
         swapRate = newRate;

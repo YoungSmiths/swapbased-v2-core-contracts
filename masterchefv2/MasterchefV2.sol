@@ -151,6 +151,13 @@ contract MasterchefV2 is Ownable {
     mapping(address => uint) public poolPidByStakingFarmAddress;
     mapping(address => bool) public voted;
 
+    /**
+     * @notice 部署 MasterchefV2：绑定 xBASE、默认多代币奖励与全局挖矿起始时间。
+     * @param _xBASE 治理代币 xBASE 地址（投票权）
+     * @param _rewards 默认奖励代币地址数组
+     * @param _ratios 与 _rewards 对齐的万分比
+     * @param _stakingRewardsGenesis 全局允许 `mintRewards` 的起始时间戳
+     */
     constructor(
         address _xBASE,
         address[] memory _rewards,
@@ -168,9 +175,12 @@ contract MasterchefV2 is Ownable {
 
     ///// permissioned functions
 
-    // deploy a staking reward contract for the staking token, and store the reward amount
-    // the reward will be distributed to the staking reward contract no sooner than the genesis
-
+    /**
+     * @notice 批量注册已部署的 Farm（StakingRewards）合约。
+     * @param _addys Farm 合约地址数组
+     * @param _start 各池 Farm 开始时间，须均大于 `stakingRewardsGenesis`
+     * @param _masterchefControlled 各池是否由 Chef `_updatePool` 同步每秒产出
+     */
     function deployBulk(address[] memory _addys, uint256[] memory _start, bool[] memory _masterchefControlled) public onlyOwner {
         uint256 length = _addys.length;
         for (uint256 pid = 0; pid < length; ++pid) {
@@ -178,10 +188,17 @@ contract MasterchefV2 is Ownable {
         }
     }
 
+    /**
+     * @notice 注册单个已存在的 Farm 合约。
+     * @param _farmAddress StakingRewards 地址
+     * @param _farmStartTime 该池计奖起始时间
+     * @param _masterchefControlled 是否由本合约控制 `setRewardRate`
+     */
     function deploy(address _farmAddress, uint256 _farmStartTime, bool _masterchefControlled) public onlyOwner {
         _deploy(_farmAddress, _farmStartTime, _masterchefControlled);
     }
 
+    /// @dev 登记 `isFarm`、追加 `poolInfo`、默认 `ratios/rewards` 来自构造函数
     function _deploy(address _farmAddress, uint256 _farmStartTime, bool _masterchefControlled) internal {
         StakingRewardsInfo storage info = stakingRewardsInfoByStakingFarmAddress[_farmAddress];
         require(info.stakingRewards == address(0), 'MasterChef: already deployed');
@@ -204,6 +221,11 @@ contract MasterchefV2 is Ownable {
 
     // deploy a staking reward contract for the staking token, and store the reward amount
     // the reward will be distributed to the staking reward contract no sooner than the genesis
+    /**
+     * @notice 内联创建新的 `StakingRewards` 并注册为 Farm。
+     * @param _stakingToken 用户质押代币（多为 LP）
+     * @param _farmStartTime Farm 起始时间，须大于 `stakingRewardsGenesis`
+     */
     function deployWithCreation(address _stakingToken, uint256 _farmStartTime) public onlyOwner {
         address newFarm = address(new StakingRewards(address(this), owner(), _stakingToken, 0, _farmStartTime));
         StakingRewardsInfo storage info = stakingRewardsInfoByStakingFarmAddress[newFarm];
@@ -387,6 +409,11 @@ contract MasterchefV2 is Ownable {
 
     // -----------------------------
 
+    /**
+     * @notice 计算用户投票权：xBASE 钱包余额 + 可选的「单币质押计票」Farm 内余额。
+     * @param _user 用户地址
+     * @return 可用于 `votePool` 的权重（未在函数内校验是否已投票）
+     */
     function getTotalVotePower(address _user) public view returns(uint256){
         // get xBASE wallet balance
         uint256 xBaseUserWalletBalance = IERC20(xBASE).balanceOf(_user);
@@ -402,6 +429,10 @@ contract MasterchefV2 is Ownable {
         return amount1;
     }
 
+    /**
+     * @notice 将当前用户全部投票权投给池子 `_pid`（仅可投票池且每人未投过票时）。
+     * @param _pid `poolInfo` 中的池索引
+     */
     function votePool(uint256 _pid) external {
         require(poolInfo[_pid].isVoteable, "vote not permitted");
         address _user = msg.sender;
@@ -414,6 +445,7 @@ contract MasterchefV2 is Ownable {
     }
     
 
+    /// @notice 撤销当前投票并回收对应 `allocPointCommunity`
     function unVotePool() external {
         address _user = msg.sender;
         require(voted[_user], "not voted");

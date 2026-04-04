@@ -87,9 +87,15 @@ interface ISingleStaking {
 
 /* MADE BY KELL */
 
+/**
+ * @title MasterChefCoin
+ * @notice 与 MasterchefV2 同族的 **流动性挖矿调度中心**：仅已注册的 Farm（`StakingRewards`）可调用 `mintRewards`，按池 `ratios`（万分比）向多种 `IBaseToken` 铸币。
+ * @dev 在 V2 基础上增加 **`minters` 与 `mintRewardsByAddress`**：白名单可不经过 Farm 的 `ratios` 拆分，直接对指定代币 `mint`；构造函数将 `minters[部署者]=true`。
+ */
 contract MasterChefCoin is Ownable {
     using SafeMath for uint256;
     // immutables
+    /// @notice 治理代币 xBASE，用于 `getTotalVotePower` 与投票逻辑（与 V2 一致）
     address public xBASE;
     uint public stakingRewardsGenesis;
     uint public totalAllocPoint;
@@ -137,13 +143,22 @@ contract MasterChefCoin is Ownable {
     mapping(address => uint) public poolPidByStakingFarmAddress;
     mapping(address => bool) public voted;
 
+    /// @notice 可调用 `mintRewardsByAddress` 的白名单地址；部署者为初始 minter
     mapping(address => bool) public minters;
 
+    /// @notice 仅允许 `minters[msg.sender] == true`
     modifier onlyRewardsMinter() {
         require(minters[msg.sender] == true, "Only minters allowed");
         _;
     }
 
+    /**
+     * @notice 部署 MasterChefCoin，设置默认多代币奖励与全局挖矿起始时间。
+     * @param _xBASE 治理代币 xBASE 合约地址
+     * @param _rewards 默认奖励代币列表（须实现 IBaseToken.mint）
+     * @param _ratios 与 _rewards 等长的万分比数组，总和通常约定为 10000
+     * @param _stakingRewardsGenesis 到达该时间戳后才允许 `mintRewards` / `mintRewardsByAddress`（须 ≥ block.timestamp）
+     */
     constructor(
         address _xBASE,
         address[] memory _rewards,
@@ -165,6 +180,12 @@ contract MasterChefCoin is Ownable {
     // deploy a staking reward contract for the staking token, and store the reward amount
     // the reward will be distributed to the staking reward contract no sooner than the genesis
 
+    /**
+     * @notice 批量注册已部署的 Farm 合约地址（不内联 new StakingRewards）。
+     * @param _addys Farm（StakingRewards）合约地址数组
+     * @param _start 各池 Farm 起始时间，须均大于 `stakingRewardsGenesis`
+     * @param _masterchefControlled 是否与 Chef 同步 `rewardRate`；为 true 时通常 `isVoteable` 同为 true
+     */
     function deployBulk(address[] memory _addys, uint256[] memory _start, bool[] memory _masterchefControlled) public onlyOwner {
         uint256 length = _addys.length;
         for (uint256 pid = 0; pid < length; ++pid) {
@@ -172,10 +193,17 @@ contract MasterChefCoin is Ownable {
         }
     }
 
+    /**
+     * @notice 注册单个已存在的 Farm 合约。
+     * @param _farmAddress StakingRewards 合约地址
+     * @param _farmStartTime 该池允许开始计奖的时间（须 > stakingRewardsGenesis）
+     * @param _masterchefControlled 是否由 Chef `_updatePool` 驱动 `setRewardRate`
+     */
     function deploy(address _farmAddress, uint256 _farmStartTime, bool _masterchefControlled) public onlyOwner {
         _deploy(_farmAddress, _farmStartTime, _masterchefControlled);
     }
 
+    /// @dev 写入 `isFarm`、追加 `poolInfo`、登记 `poolPidByStakingFarmAddress`
     function _deploy(address _farmAddress, uint256 _farmStartTime, bool _masterchefControlled) internal {
         StakingRewardsInfo storage info = stakingRewardsInfoByStakingFarmAddress[_farmAddress];
         require(info.stakingRewards == address(0), 'MasterChef: already deployed');
@@ -198,6 +226,11 @@ contract MasterChefCoin is Ownable {
 
     // deploy a staking reward contract for the staking token, and store the reward amount
     // the reward will be distributed to the staking reward contract no sooner than the genesis
+    /**
+     * @notice 内联 `new StakingRewards` 部署新 Farm 并注册；质押标的为 `_stakingToken`（多为 LP）。
+     * @param _stakingToken 用户质押的 ERC20（如 Uniswap V2 LP）
+     * @param _farmStartTime Farm 起始时间，须 > stakingRewardsGenesis
+     */
     function deployWithCreation(address _stakingToken, uint256 _farmStartTime) public onlyOwner {
         address newFarm = address(new StakingRewards(address(this), owner(), _stakingToken, 0, _farmStartTime));
         StakingRewardsInfo storage info = stakingRewardsInfoByStakingFarmAddress[newFarm];
@@ -230,7 +263,11 @@ contract MasterChefCoin is Ownable {
 
     ///// permissionless functions
 
-    // notify reward amount for an individual staking token.
+    /**
+     * @notice Farm 在用户领取奖励时调用：按本池 `rewards`/`ratios` 将 `_amount` 拆成多笔 `mint`（万分比）。
+     * @param _receiver 奖励接收地址（通常为领励用户）
+     * @param _amount StakingRewards 中累计的「奖励计量」总量（与 `getReward` 中 `reward` 一致）
+     */
     function mintRewards(address _receiver, uint256 _amount) public {
         require(isFarm[msg.sender] == true, "MasterChef: only farms can mint rewards");
         require(block.timestamp >= stakingRewardsGenesis, 'Masterchef: rewards too soon');
@@ -247,7 +284,12 @@ contract MasterChefCoin is Ownable {
         }
     }
 
-    // notify reward amount for an individual staking token.
+    /**
+     * @notice 白名单入口：不经过 Farm `ratios` 拆分，直接向指定 `IBaseToken` 铸 `_amount` 给 `_receiver`。
+     * @param _receiver 接收铸造代币的地址
+     * @param _amount 铸造数量
+     * @param _token 奖励代币合约地址（须实现 IBaseToken）
+     */
     function mintRewardsByAddress(address _receiver, uint256 _amount, address _token) public onlyRewardsMinter {
         require(
             IBaseToken(_token).mint(_receiver, _amount), 'MasterChef: mint rewardsToken failed'
