@@ -1,6 +1,48 @@
 # SwapBased V2 Core 学习指南
 
-本文档面向希望**系统理解本仓库**、并达到**面试可深入讲解**水平的读者。阅读顺序建议：先通读本指南，再对照源码与 `[INTERVIEW_PREP.md](INTERVIEW_PREP.md)` 中的问题自测。
+本文档面向希望**系统理解本仓库**、并达到**面试可深入讲解**水平的读者。与 [`INTERVIEW_PREP.md`](INTERVIEW_PREP.md) **配套使用**：学习指南负责**体系化知识与章节深度**，面试准备负责**分主题问答与速查**。
+
+---
+
+## 0. 文档说明、阅读路线与章节索引
+
+### 0.1 两文档怎样配合
+
+| 文档 | 定位 | 建议用法 |
+|------|------|----------|
+| **本指南（LEARNING_GUIDE）** | 架构、模块、流程图、合约地图、学习路径 | 第一遍通读建立地图；查具体模块时按章节跳转 |
+| **[INTERVIEW_PREP.md](INTERVIEW_PREP.md)** | 高频考点、自测问答、速查清单 | 读完相关章节后做对应字母块；面试前看该文档 **G 节** |
+
+### 0.2 章节总览（与面试块对照）
+
+| 章 | 标题 | 内容摘要 | 面试准备 |
+|----|------|----------|----------|
+| **1** | 项目一句话 | 仓库定位 | **F3** 一句话介绍 |
+| **2** | 整体架构 | 分层、数据流图 | **F** 综合 |
+| **3** | 设计思路 | 为何 Chef 网关、奖励与投票 | **C** |
+| **4** | 核心用户流程 | 交易→质押→领奖→投票 | **F** |
+| **5** | Uniswap V2 核心 | CPAMM、Router、TWAP 要点 | **A** |
+| **6** | Vaults v2 要点（速览） | xBASE/oCOIN/单币池提纲 | 预习 **D**；详解见 **§12** |
+| **7** | CoinToken | COIN 权限与场景 | 代币经济 / **E** 特权 |
+| **8** | BaseToken | BASE 与 COIN 分工 | 同上 |
+| **9** | Chef + Farm | 控权铸币、StakingRewards | **B、C** |
+| **10** | OtcSwap | xBASE→BASE OTC | 与 **§8/§12** 衔接 |
+| **11** | BaseTokenLocker | LP 锁仓与费用 | 工具层 |
+| **12** | Vaults v2（详解） | 与 Chef 衔接、单币池差异 | **D、F1** |
+| **13** | 合约地图 | 按目录速查文件 | 定位源码 |
+| **14** | Solidity 与依赖 | 版本、扁平化代码 | **E3** |
+| **15** | 学习路径建议 | 推荐阅读顺序 | 与 **§0.3** 一致 |
+| **16** | 诚实边界 | 链上/审计边界 | **E** |
+
+### 0.3 三条阅读路线（可选）
+
+1. **快速鸟瞰（约 30～60 分钟）**：**§1 → §2 → §4 → §9.1～9.2 → §13**（合约地图），再扫 **INTERVIEW_PREP G 节**。
+2. **系统精读（与 §15 一致）**：按 **§15** 编号顺序，每读完一章在 **INTERVIEW_PREP** 做对应「面试块」（见上表）。
+3. **面试冲刺**：以 **INTERVIEW_PREP** 为主线，每题不会的回到上表「章」跳转本指南与源码。
+
+---
+
+> **第一篇 · 总览与架构**（建立全局图：产品是什么、数据怎么流、用户怎么走）
 
 ---
 
@@ -94,11 +136,19 @@ flowchart TB
 
 ---
 
+> **第二篇 · AMM 交易层**（与 **INTERVIEW_PREP · A** 对应）
+
+---
+
 ## 5. Uniswap V2 核心（本仓库片段）
 
 - **恒定乘积**：`reserve0 * reserve1` 在单笔 swap 后不减（扣除手续费后仍满足池子规则）；`swap` 前会更新累计价格用于 TWAP（`[UniswapV2Pair.sol](UniswapV2Pair.sol)`）。
 - **手续费与协议费**：标准 V2 逻辑，`feeOn` 时可能向 `feeTo` 铸造流动性（`_mintFee`）。
 - **Router**：封装 `addLiquidity` / `swapExactTokensForTokens` 等，处理比例、最小输出、deadline。
+
+---
+
+> **衔接：Vaults 速览**（与 **§12**、**INTERVIEW_PREP · D** 对应；本篇仅列要点）
 
 ---
 
@@ -109,6 +159,10 @@ flowchart TB
 - `**SingleStakingRewardsBase` / `XBase` / `OtherTokens**`：与 `masterchefv2/StakingRewards` 同思路的单币质押变体，用于不同质押资产或奖励路径。
 
 更细的架构、流程与文件说明见 **第 12 节**。
+
+---
+
+> **第三篇 · 协议代币与锁仓工具**（**§7～§8** 代币经济；**§11** 合规/营销向锁仓；可与 **INTERVIEW_PREP · E** 特权风险对照）
 
 ---
 
@@ -237,6 +291,10 @@ sequenceDiagram
 - **与 COIN 分工**：多 Farm、多入口同时 `mint` 更适合 **CoinToken**；单角色控通胀、初始大额分配更适合 **BaseToken**。
 
 更细注释见 [`BaseToken.sol`](BaseToken.sol)。
+
+---
+
+> **第四篇 · 挖矿、治理与 OTC**（**§9** 与 **INTERVIEW_PREP · B、C**；**§10** 衔接 BASE/xBASE 流动性）
 
 ---
 
@@ -377,6 +435,10 @@ sequenceDiagram
 
 ---
 
+> **工具合约 · LP 锁仓**（与 **§8 BaseToken** 费用支付常配合使用）
+
+---
+
 ## 11. BaseTokenLocker
 
 [`BaseTokenLocker.sol`](BaseTokenLocker.sol) 提供 **任意 ERC20（常见为 Uniswap V2 风格 LP Token）的定时锁仓**：用户将代币转入合约并约定 **解锁时间** 与 **领取地址 `withdrawer`**，协议按 **BaseToken 固定费** + **锁仓代币万分比抽成** 向营销地址收费。适用于「团队/做市方承诺一段时间内不抛售 LP」等透明展示场景。
@@ -444,6 +506,10 @@ sequenceDiagram
 
 ---
 
+> **第五篇 · Vaults 与 MasterChef 衔接**（**§6** 为本篇速览；**§12** 为详解；与 **INTERVIEW_PREP · D、F1** 对应）
+
+---
+
 ## 12. Vaults v2（xBASE / oCOIN / 单币质押）
 
 [`vaultsv2/`](vaultsv2/) 与 [`masterchefv2/`](masterchefv2/) **无源码 import 依赖**，通过部署时写入 **`masterChef` 地址**与 **代币地址** 对接：衍生代币合约（xBASE、oCOIN）在 **claim / instantExit** 等路径调用 **`IMasterChef.mintRewards`**；单币质押合约则与 `StakingRewards` 同构，由 **Chef 或简化工厂** 控制 **`setRewardRate`** 与 **铸币**。Solidity **0.8.12**（xBASE、oCOIN）与 **^0.5.16**（`SingleStakingRewards*`）并存。
@@ -500,6 +566,10 @@ sequenceDiagram
 - **预存型 OtherTokens**：`SingleStakingRewardsOtherTokens` **不会** `mintRewards`，需事先向合约转入足够 **`rewardsToken`**。
 
 更细的 NatSpec 见 [`vaultsv2/xBASE.sol`](vaultsv2/xBASE.sol)、[`vaultsv2/oCOIN.sol`](vaultsv2/oCOIN.sol) 及 `SingleStakingRewards*.sol`。
+
+---
+
+> **第六篇 · 索引与元信息**（查文件、查版本、查边界；**§14～§16** 与 **INTERVIEW_PREP · E** 工程/安全题呼应）
 
 ---
 
@@ -568,16 +638,20 @@ sequenceDiagram
 
 ## 15. 学习路径建议
 
-1. 读 `UniswapV2Pair` 的 `swap` / `mint` / `burn` 与 `lock` 修饰器，理解重入保护与余额检查。
-2. 读 `StakingRewards` 的 `rewardPerToken`、`earned`、`updateReward`、`getReward`。
-3. 读 `MasterchefV2` 的 `mintRewards`、`_updatePool`、`votePool` 与 Owner 管理函数。
-4. 对照 **上文第 9 节** 与 `masterchefv2` 下 `StakingRewards` / `MasterChefCoin`，建立「Chef 网关 + Farm」整体心智模型。
-5. 阅读 **上文第 12 节** 与 [`vaultsv2/xBASE.sol`](vaultsv2/xBASE.sol)、[`vaultsv2/oCOIN.sol`](vaultsv2/oCOIN.sol)、`SingleStakingRewards*.sol`，理解衍生代币与 Chef 的衔接。
-6. 对照 [`BaseToken.sol`](BaseToken.sol) 与上文第 8 节，理解 BASE 的 Operator 铸币与初始分配。
-7. 阅读 [`masterchefv2/OtcSwap.sol`](masterchefv2/OtcSwap.sol) 与上文第 10 节，理解 xBASE→BASE 的固定比例 OTC 与 Owner 注资。
-8. 阅读 `BaseTokenLocker` 的锁仓/解锁与费用逻辑（见上文第 11 节）。
-9. 对照 [`CoinToken.sol`](CoinToken.sol) 与上文第 7 节，理解 `minters` / Operator 与 Farm 奖励的配合。
-10. 用 `[INTERVIEW_PREP.md](INTERVIEW_PREP.md)` 做闭卷问答，回到源码标出行号加深记忆。
+下列顺序与 **§0.2 章节总览**、**INTERVIEW_PREP** 各块一一对应；完成后建议按 **INTERVIEW_PREP · A→G** 自测。
+
+| 步骤 | 建议阅读（本指南） | 自测（INTERVIEW_PREP） |
+|------|-------------------|------------------------|
+| 1 | **§5** `UniswapV2Pair` / Router、`lock` 修饰器 | **A** |
+| 2 | **§9** + 源码 `StakingRewards`、`MasterchefV2` / `MasterChefCoin` | **B、C** |
+| 3 | **§12** + `vaultsv2/xBASE`、`oCOIN`、`SingleStakingRewards*` | **D、F1** |
+| 4 | **§8**、**§7** `BaseToken`、`CoinToken` | 代币分工 / **E** 特权 |
+| 5 | **§10** `OtcSwap` | 与 xBASE/BASE 经济衔接 |
+| 6 | **§11** `BaseTokenLocker` | 工具向 |
+| 7 | **§1～§4** 总览（若尚未读） | **F3** 一句话 |
+| 8 | **§16** 诚实边界；**§14** 版本说明 | **E** 工程与安全 |
+
+**精简版（最小闭环）**：**§1～2 → §9 → §12 → §13**（合约地图），再 **INTERVIEW_PREP · G** 速查。
 
 ---
 

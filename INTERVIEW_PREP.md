@@ -1,10 +1,27 @@
 # SwapBased V2 Core 面试准备（分主题问答）
 
-使用方式：每题先**自答**，再对照「参考答案要点」。结合源码时优先打开 `[LEARNING_GUIDE.md](LEARNING_GUIDE.md)` 中的合约地图定位文件。
+## 与《学习指南》的关系
+
+- **[LEARNING_GUIDE.md](LEARNING_GUIDE.md)** 提供 **§0 文档说明与章节索引**、分篇导航与流程图；本文件提供 **考点问答** 与 **面试前速查**。
+- **使用顺序建议**：先掌握学习指南 **§0.2 章节总览**（知道每章对应下面哪一块），再按 **A→G** 自测；卡壳时回到表中「学习指南」列跳转精读。
+
+### 主题块 ↔ 学习指南章节
+
+| 本文件 | 主题 | 学习指南（精读） | 源码锚点 |
+|--------|------|------------------|----------|
+| **A** | Uniswap V2 / AMM | **§5** | `UniswapV2Pair`、`UniswapV2Router02` |
+| **B** | StakingRewards 积分模型 | **§9**、**§3.2** | `masterchefv2/StakingRewards.sol` |
+| **C** | MasterChef / 治理 / 投票 | **§9**、**§3.3～3.4** | `MasterchefV2.sol`、`MasterChefCoin.sol` |
+| **D** | Vaults（xBASE / oCOIN） | **§6（速览）**、**§12（详解）** | `vaultsv2/xBASE.sol`、`oCOIN.sol` |
+| **E** | 安全与工程 | **§16**、**§14** | 全仓特权面、测试脚手架 |
+| **F** | 综合与对比 | **§2～§4**、**§12** | 跨模块 |
+| **G** | 面试前 5 分钟速查 | **§0.3**、**§15** | — |
 
 ---
 
 ## A. Uniswap V2 与 AMM
+
+**对应学习指南**：[LEARNING_GUIDE.md](LEARNING_GUIDE.md) **§5**（Uniswap V2 核心）
 
 ### A1. 恒定乘积做市商（CPAMM）核心公式是什么？和「价格」有什么关系？
 
@@ -53,6 +70,8 @@
 
 ## B. StakingRewards（Synthetix 模型）
 
+**对应学习指南**：[LEARNING_GUIDE.md](LEARNING_GUIDE.md) **§9**（Chef + Farm）、**§3.2**（奖励模型直觉）
+
 ### B1. `rewardPerToken()` 的数学含义？
 
 **考点**：每秒奖励按总质押量分摊。
@@ -96,6 +115,8 @@
 ---
 
 ## C. MasterChef 与治理
+
+**对应学习指南**：[LEARNING_GUIDE.md](LEARNING_GUIDE.md) **§9**、**§3.3～3.4**（池子控制与投票）
 
 ### C1. 谁可以调用 `mintRewards`？`msg.sender` 为什么是 Farm？
 
@@ -150,6 +171,8 @@
 
 ## D. Vaults（xBASE / oCOIN）
 
+**对应学习指南**：[LEARNING_GUIDE.md](LEARNING_GUIDE.md) **§12**（Vaults 详解）；速览见 **§6**
+
 ### D1. `oCOIN` 中 `instantExit` 大致做什么？
 
 **考点**：惩罚、外部支付、MasterChef。
@@ -169,6 +192,8 @@
 ---
 
 ## E. 安全与工程
+
+**对应学习指南**：[LEARNING_GUIDE.md](LEARNING_GUIDE.md) **§16**（诚实边界）、**§14**（Solidity 与依赖）
 
 ### E1. 列举本仓库典型的中心化/特权风险。
 
@@ -200,6 +225,8 @@
 
 ## F. 对比与综合题
 
+**对应学习指南**：[LEARNING_GUIDE.md](LEARNING_GUIDE.md) **§2**（整体架构）、**§12**（Vaults）
+
 ### F1. `masterchefv2/StakingRewards` 与 `vaultsv2/SingleStakingRewardsBase` 的共同点？
 
 **参考答案要点**：同为质押积分模型，均依赖 `IMasterChef.mintRewards` 发放；差异在质押资产、税费、工厂部署等细节。
@@ -212,14 +239,29 @@
 
 **参考答案示例**：「这是基于 Uniswap V2 的 AMM 配套一套 MasterChef 网关的多代币挖矿：Farm 用 StakingRewards 记账，真正发奖时由 MasterChef 按池配置铸造多种 `IBaseToken`，并带 xBASE 投票调节社区奖励分配。」
 
+（可对照 [LEARNING_GUIDE.md](LEARNING_GUIDE.md) **§1** 微调表述。）
+
 ---
 
 ## G. 速查清单（面试前 5 分钟）
 
-- 能画出：用户 → StakingRewards → MasterChef → 多 `mint`。
-- 能口述：`rewardPerToken`、`earned`、`updateReward`。
-- 能解释：`isFarm`、`allocPoint`、`allocPointCommunity`、7 天 `massUpdate`。
-- 能说出：Uniswap `lock`、CPAMM 滑点、TWAP 用途。
-- 能诚实说：特权面、未校验 `ratios` 总和、仓库无内置测试脚手架。
+**对应学习指南**：[LEARNING_GUIDE.md](LEARNING_GUIDE.md) **§0.3**（阅读路线）、**§15**（学习路径）
+
+- 能画出：用户 → StakingRewards → MasterChef → 多 `mint`。（**§2、§9**）
+- 能口述：`rewardPerToken`、`earned`、`updateReward`。（**§9、本文件 B**）
+- 能解释：`isFarm`、`allocPoint`、`allocPointCommunity`、7 天 `massUpdate`。（**§9、本文件 C**）
+- 能说出：Uniswap `lock`、CPAMM 滑点、TWAP 用途。（**§5、本文件 A**）
+- 能诚实说：特权面、未校验 `ratios` 总和、仓库无内置测试脚手架。（**§16、本文件 E**）
+
+---
+
+## 附录：代币与工具速查（补充题）
+
+| 若被问到 | 精读章节（[LEARNING_GUIDE.md](LEARNING_GUIDE.md)） |
+|----------|----------|
+| COIN 谁可 `mint`、`burnFrom` 为何特殊 | **§7** CoinToken |
+| BASE 初始分配与 Operator | **§8** BaseToken |
+| xBASE→BASE 非 AMM 兑换 | **§10** OtcSwap |
+| LP 定时锁仓与费用 | **§11** BaseTokenLocker |
 
 祝面试顺利。
