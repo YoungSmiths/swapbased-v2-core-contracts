@@ -402,6 +402,11 @@ interface ITokenBurnable is IERC20 {
     function burn(uint256 amount) external;
 }
 
+/**
+ * @title Lottery
+ * @notice 基于 `baseToken` 的质押抽奖：用户 `stake` 参与，`resetManager` 等角色驱动开奖与奖金池（日奖池 / 大奖等）；与 MasterChef 无直接铸币耦合。
+ * @dev 具体名次分配、手续费与大奖概率见常量与 `Round` 结构；详读业务前请完整走读 `stake`/开奖路径。
+ */
 contract Lottery is ReentrancyGuard {
     using SafeMath for uint256;
     using SafeERC20 for IERC20;

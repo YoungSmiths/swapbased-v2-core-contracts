@@ -80,9 +80,15 @@ interface IBaseToken {
     function mint(address recipient_, uint256 amount_) external returns (bool);
 }
 
+/**
+ * @title StakingRewardsFactory
+ * @notice **简化版**挖矿调度：为每个 `_stakingToken` 部署独立 `StakingRewards`，`mintRewards` 仅向 **单一** `rewardsToken` 铸造（无多币 `ratios`、无 xBASE 投票）。
+ * @dev 与 `MasterchefV2` 二选一；`updatePool` 按 `globalSkullPerSecond * allocPoint / totalAllocPoint` 设置各 Farm 的 `rewardRate`。
+ */
 contract StakingRewardsFactory is Ownable {
     using SafeMath for uint256;
     // immutables
+    /// @notice 唯一奖励代币，须实现 IBaseToken.mint
     address public rewardsToken;
     uint public stakingRewardsGenesis;
     uint public totalAllocPoint;
@@ -119,6 +125,10 @@ contract StakingRewardsFactory is Ownable {
     // rewards info by staking token
     mapping(address => StakingRewardsInfo) public stakingRewardsInfoByStakingToken;
 
+    /**
+     * @param _rewardsToken 全池统一的奖励代币地址
+     * @param _stakingRewardsGenesis 全局允许开始发奖的时间戳
+     */
     constructor(
         address _rewardsToken,
         uint _stakingRewardsGenesis
@@ -131,8 +141,12 @@ contract StakingRewardsFactory is Ownable {
 
     ///// permissioned functions
 
-    // deploy a staking reward contract for the staking token, and store the reward amount
-    // the reward will be distributed to the staking reward contract no sooner than the genesis
+    /**
+     * @notice 为 `_stakingToken` 部署新的 `StakingRewards`（Chef 为本合约 `address(this)`）。
+     * @param _stakingToken 用户将质押的代币（如 LP）
+     * @param _rewardRate 初始每秒奖励（后续由 `updatePool` 覆盖）
+     * @param _farmStartTime 须大于 `stakingRewardsGenesis`
+     */
     function deploy(address _stakingToken, uint256 _rewardRate, uint256 _farmStartTime) public onlyOwner {
         StakingRewardsInfo storage info = stakingRewardsInfoByStakingToken[_stakingToken];
         require(info.stakingRewards == address(0), 'MasterChef: already deployed');
@@ -150,7 +164,11 @@ contract StakingRewardsFactory is Ownable {
 
     ///// permissionless functions
 
-    // notify reward amount for an individual staking token.
+    /**
+     * @notice 由已注册的 Farm 合约调用：向 `_receiver` 铸造 `_amount` 的 `rewardsToken`。
+     * @param _receiver 奖励接收方
+     * @param _amount 铸造数量（奖励计量）
+     */
     function mintRewards(address _receiver, uint256 _amount) public {
         require(isFarm[msg.sender] == true, "MasterChef: only farms can mint rewards");
         require(block.timestamp >= stakingRewardsGenesis, 'Masterchef: rewards too soon');
@@ -165,7 +183,7 @@ contract StakingRewardsFactory is Ownable {
     }
 
 
-    // Update reward variables for all pools. Be careful of gas spending!
+    /// @notice 遍历全部池子并刷新各 Farm 的 `rewardRate`（gas 随池数增长）
     function massUpdatePools() public {
         uint256 length = poolInfo.length;
         for (uint256 pid = 0; pid < length; ++pid) {
@@ -173,7 +191,10 @@ contract StakingRewardsFactory is Ownable {
         }
     }
 
-    // Update reward variables of the given pool to be up-to-date.
+    /**
+     * @notice 按池 `allocPoint` 与 `globalSkullPerSecond` 计算并 `setRewardRate`；若 Farm 已 kill 则置 0。
+     * @param _pid `poolInfo` 索引
+     */
     function updatePool(uint256 _pid) public {
         PoolInfo storage pool = poolInfo[_pid];
         StakingRewardsInfo storage info = stakingRewardsInfoByStakingToken[address(pool.lpToken)];
@@ -190,6 +211,11 @@ contract StakingRewardsFactory is Ownable {
         IStakingRewards(info.stakingRewards).setRewardRate(globalSkullPerSecond.mul(pool.allocPoint).div(totalAllocPoint));
     }
 
+    /**
+     * @notice 设置某池分配权重（Owner）。
+     * @param _pid 池索引
+     * @param _allocPoint 新权重，参与 `totalAllocPoint` 分摊
+     */
     function set(uint256 _pid, uint256 _allocPoint) external onlyOwner {
         PoolInfo storage pool = poolInfo[_pid];
         if (totalAllocPoint != 0) {
@@ -203,6 +229,7 @@ contract StakingRewardsFactory is Ownable {
 
     /*********************** FARMS CONTROLS ***********************/
 
+    /// @param _farm 质押代币地址（见本合约 `isFarm` 键语义）
     function killFarm(address _farm) external onlyOwner {
         require(isFarm[_farm] == true, "MasterChef: This is not active");
 
@@ -211,6 +238,7 @@ contract StakingRewardsFactory is Ownable {
         massUpdatePools();
     }
 
+    /// @param _farm 质押代币地址
     function activateFarm(address _farm) external onlyOwner {
         StakingRewardsInfo storage info = stakingRewardsInfoByStakingToken[_farm];
         require(info.stakingRewards != address(0), 'MasterChef: needs to be a dead farm');
@@ -221,6 +249,10 @@ contract StakingRewardsFactory is Ownable {
         massUpdatePools();
     }
 
+    /**
+     * @notice 设置全局每秒奖励总量（再按各池 `allocPoint` 分摊）。
+     * @param _globalSkullPerSecond 新的全局速率
+     */
     function setGlobalSkullPerSecond(uint256 _globalSkullPerSecond) public onlyOwner {
         globalSkullPerSecond = _globalSkullPerSecond;
     }

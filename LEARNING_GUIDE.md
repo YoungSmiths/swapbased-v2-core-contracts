@@ -238,11 +238,84 @@ sequenceDiagram
 
 ---
 
-## 9. OtcSwap（xBASE → BASE）
+## 9. Chef 控权铸币 + 单池质押分奖 + 部署 Farm
+
+本仓库在 [`masterchefv2/`](masterchefv2/) 下实现 **Synthetix 式单池质押（`StakingRewards`）** 与 **MasterChef 铸币网关** 的组合：Farm 合约**不预存**全部奖励代币，只在用户 `getReward` 时把累计的「奖励计量」交给 Chef，由 Chef **`mintRewards` → 各奖励代币 `IBaseToken.mint`**。**仅 `isFarm` 注册的地址**可调用 `mintRewards`，从而把增发权限从任意 ERC20 收束到已审计的 Farm。
+
+涉及主文件：**[`MasterchefV2.sol`](masterchefv2/MasterchefV2.sol)**（多币 `ratios` + xBASE 投票）、**[`MasterChefCoin.sol`](masterchefv2/MasterChefCoin.sol)**（同上 + `mintRewardsByAddress` / `minters`）、**[`StakingRewards.sol`](masterchefv2/StakingRewards.sol)**（`rewardPerToken` / `earned` / `getReward`）、**[`StakingRewardsFactory.sol`](masterchefv2/StakingRewardsFactory.sol)**（单币奖励的简化 Chef）。**[`Lottery.sol`](masterchefv2/Lottery.sol)** 为独立抽奖逻辑，与 Chef 无直接铸币耦合。
+
+### 9.1 业务场景与实例
+
+| 场景 | 说明 |
+|------|------|
+| **部署 Farm** | Owner 调用 **`deployWithCreation(stakingToken, farmStartTime)`** 内联 `new StakingRewards`，或先外部部署 StakingRewards 再 **`deploy(farmAddress, startTime, masterchefControlled)`** 注册；`stakingRewardsGenesis` 之前不可 `mintRewards`。 |
+| **多币奖励** | `MasterchefV2` / `MasterChefCoin` 每池配置 `rewards[]` 与 `ratios[]`（**万分比**）；`mintRewards` 内 `_amount * ratios[i] / 10000` 分别 `mint` 至 COIN、BASE 等。 |
+| **权重与每秒产出** | Owner 设 `globalSkullPerSecond`、`set(pid, allocPoint)`；若 `masterchefControlled`，`_updatePool` 按权重把全局速率写成该池 `StakingRewards.setRewardRate`。 |
+| **社区投票加成** | 用户持有 xBASE（及可选单币质押计票）`votePool(pid)`，增加该池 `allocPointCommunity`，与 `globalCommunitySkullPerSecond` 叠加到 `rewardRate`（至少隔 7 天可触发全量 `_massUpdatePools`）。 |
+| **简化工厂** | `StakingRewardsFactory` 仅向单一 `rewardsToken` `mint`，适合单一代币激励的早期或侧链部署。 |
+
+**简例**：团队在 Base 部署 `MasterchefV2`，构造函数传入 `[COIN, BASE]` 与 `[5000, 5000]`（万分比各 50%）。Owner `deployWithCreation(BASE_ETH_LP, start)` 生成 Farm A；用户向 Farm A `stake(LP)`，一段时间后 `getReward()`：Farm 调用 `mintRewards(user, R)`，Chef 向用户铸 `R*50%` 的 COIN 与 `R*50%` 的 BASE，并另对用户奖励的 2% 再铸给 `taxWallet`（见 `StakingRewards` 中 `ownerFee`）。
+
+### 9.2 架构图
+
+```mermaid
+flowchart TB
+  subgraph chef [MasterchefV2 / MasterChefCoin]
+    Gate[mintRewards 仅 isFarm]
+    Split[按 ratios 万分比拆分]
+    Vote[xBASE 投票与 allocPointCommunity]
+  end
+  subgraph farm [StakingRewards 每池一个]
+    Acc[rewardPerToken 积分]
+    GR[getReward 调 mintRewards]
+  end
+  subgraph tokens [IBaseToken 奖励币]
+    T1[COIN]
+    T2[BASE]
+  end
+  User((用户)) -->|stake LP| farm
+  farm --> GR
+  GR --> Gate
+  Gate --> Split
+  Split --> T1
+  Split --> T2
+  Vote -.-> chef
+```
+
+### 9.3 交互流程图（质押 → 领取）
+
+```mermaid
+sequenceDiagram
+  participant U as 用户
+  participant F as StakingRewards
+  participant C as MasterChef
+  participant R as IBaseToken奖励
+  U->>F: stake(amount)
+  Note over F: depositFee 至 taxWallet，净额进池
+  U->>F: getReward()
+  F->>F: updateReward 结算 rewards
+  F->>C: mintRewards(U, reward)
+  C->>R: mint(U, reward*ratio/10000) 多笔
+  F->>C: mintRewards(taxWallet, reward*2%)
+```
+
+### 9.4 实现与使用注意
+
+- **权限**：只有 `isFarm[Farm合约]=true` 才能 `mintRewards`；不要用未注册的合约冒充 Farm。
+- **计量单位**：`StakingRewards` 里 `reward` 是内部积分换算后的数量，与 Chef 侧 `ratios` 相乘后再由各代币 `mint` 实际精度需一致（均为同一套 `1e18` 计量惯例）。
+- **MasterChefCoin 额外入口**：`mintRewardsByAddress` 供 `minters` 白名单绕过 Farm 比例直接对单币 `mint`，适合运营活动，链上需严格管 `minters`。
+- **Factory 与 V2**：`StakingRewardsFactory` 无多币与投票；选型时以产品需求为准。
+- **Lottery**：见 [`Lottery.sol`](masterchefv2/Lottery.sol) 合约头注释，与 Chef 分属不同业务线。
+
+更细的函数级 NatSpec 见上述各 `.sol` 文件内注释。
+
+---
+
+## 10. OtcSwap（xBASE → BASE）
 
 [`masterchefv2/OtcSwap.sol`](masterchefv2/OtcSwap.sol) 实现 **链上柜台兑换**：用户将 **xBASE** 转入 **Owner 地址**（协议国库/多签），按固定 **`swapRate`（百分数，默认 35）** 从合约储备的 **BASE** 中获得 `amount * swapRate / 100`。合约需在兑换前由 Owner **`supplyBASE`** 注入 BASE；源码标注曾用于 **Arbiscan** 验证（2023-05-15）。与 AMM 市价无关，属于 **协议定价的 OTC 池**。
 
-### 9.1 业务场景与实例
+### 10.1 业务场景与实例
 
 | 场景 | 说明 |
 |------|------|
@@ -252,7 +325,7 @@ sequenceDiagram
 
 **简例**：`swapRate = 35`，用户 `approve(OtcSwap, 1000e18)` 后调用 `otcSwap(1000e18)`：向 Owner 转 **1000** 枚 xBASE，用户收到 **350** 枚 BASE（若合约内 BASE ≥ 350）；`totalXBASE` 增加 1000。若协议希望提高兑付比例，Owner 调用 `changeSwapRate(40)`，则同等 1000 xBASE 可换 **400** BASE。
 
-### 9.2 架构图（资金与角色）
+### 10.2 架构图（资金与角色）
 
 ```mermaid
 flowchart TB
@@ -274,7 +347,7 @@ flowchart TB
 
 说明：`supplyBASE` 为 Owner 向合约注入 BASE；`retrieveBASE` 为 Owner 从合约取回 BASE；用户只从合约领取 **`otcSwap` 计算的 BASE**。
 
-### 9.3 交互流程图（一次兑换）
+### 10.3 交互流程图（一次兑换）
 
 ```mermaid
 sequenceDiagram
@@ -291,7 +364,7 @@ sequenceDiagram
   Note over O: totalXBASE += amount
 ```
 
-### 9.4 实现与使用注意
+### 10.4 实现与使用注意
 
 - **无滑点 AMM**：汇率仅由 `swapRate` 决定，不读取链上池子价格；可能与二级市场存在套利空间，需运营与风控配合。
 - **Owner 收款**：xBASE 直接进入 **owner()**，若 Owner 为合约须能接收 ERC20。
@@ -302,11 +375,11 @@ sequenceDiagram
 
 ---
 
-## 10. BaseTokenLocker
+## 11. BaseTokenLocker
 
 [`BaseTokenLocker.sol`](BaseTokenLocker.sol) 提供 **任意 ERC20（常见为 Uniswap V2 风格 LP Token）的定时锁仓**：用户将代币转入合约并约定 **解锁时间** 与 **领取地址 `withdrawer`**，协议按 **BaseToken 固定费** + **锁仓代币万分比抽成** 向营销地址收费。适用于「团队/做市方承诺一段时间内不抛售 LP」等透明展示场景。
 
-### 10.1 业务场景与实例
+### 11.1 业务场景与实例
 
 | 场景 | 说明 |
 |------|------|
@@ -316,7 +389,7 @@ sequenceDiagram
 
 **简例**：某用户在 Base 上为 SwapBased 池子添加流动性后得到 **100 枚 LP**；团队承诺锁仓 180 天。用户调用 `lockTokensByBase(LP_TOKEN, teamMultisig, 100e18, unlockTs)`，先 **approve** LP 与 BASE，合约扣除 0.5% LP 与 10 万枚 BASE 级固定费（具体以部署参数为准）后，将剩余 LP 记在合约内；180 天后 **`teamMultisig`** 调用 `withdrawTokens(id)` 取回。
 
-### 10.2 架构图（角色与资金）
+### 11.2 架构图（角色与资金）
 
 ```mermaid
 flowchart TB
@@ -336,7 +409,7 @@ flowchart TB
   Core -->|unlock后 transfer| Withdrawer
 ```
 
-### 10.3 交互流程图（锁仓与解锁）
+### 11.3 交互流程图（锁仓与解锁）
 
 ```mermaid
 sequenceDiagram
@@ -358,7 +431,7 @@ sequenceDiagram
   L->>W: transfer LP 剩余数量
 ```
 
-### 10.4 实现与使用注意
+### 11.4 实现与使用注意
 
 - **索引**：`depositsByWithdrawer`、`getDepositsByTokenAddress` 便于前端按人/按代币列出全部 `id`。
 - **`walletTokenBalance`**：在 `lock` 时增加 **存入者** 名下余额，在 `withdraw` 时从 **领取者 `msg.sender`** 名下扣减；若 **`withdrawer` 与存入者不同**，需自行核对是否与业务预期一致（链上原逻辑以源码为准）。
@@ -369,9 +442,9 @@ sequenceDiagram
 
 ---
 
-## 11. 合约地图（按文件）
+## 12. 合约地图（按文件）
 
-### 11.1 根目录
+### 12.1 根目录
 
 
 | 文件                                                                  | 职责简述                                  |
@@ -388,20 +461,20 @@ sequenceDiagram
 | `[helpers/](helpers/)`                                              | `Ownable`、`Context`、`ReentrancyGuard` |
 
 
-### 11.2 `masterchefv2/`
+### 12.2 `masterchefv2/`
 
 
 | 文件                                                                    | 职责简述                                             |
 | --------------------------------------------------------------------- | ------------------------------------------------ |
-| `[MasterchefV2.sol](masterchefv2/MasterchefV2.sol)`                   | 主 MasterChef：注册 Farm、`mintRewards`、alloc、投票、全局速率 |
-| `[MasterChefCoin.sol](masterchefv2/MasterChefCoin.sol)`               | 同上 + `minters` + `mintRewardsByAddress`          |
-| `[StakingRewards.sol](masterchefv2/StakingRewards.sol)`               | LP/单资产质押与奖励积分、`getReward` 调 MasterChef           |
-| `[StakingRewardsFactory.sol](masterchefv2/StakingRewardsFactory.sol)` | 工厂部署/绑定 StakingRewards 类合约                       |
-| `[OtcSwap.sol](masterchefv2/OtcSwap.sol)`                             | xBASE→BASE 固定比例 OTC（`otcSwap` / `supplyBASE`，见第 9 节）   |
+| `[MasterchefV2.sol](masterchefv2/MasterchefV2.sol)`                   | 主 MasterChef：注册 Farm、`mintRewards`、alloc、投票（见第 9 节） |
+| `[MasterChefCoin.sol](masterchefv2/MasterChefCoin.sol)`               | 同上 + `minters` + `mintRewardsByAddress`（见第 9 节）   |
+| `[StakingRewards.sol](masterchefv2/StakingRewards.sol)`               | 单池质押与奖励积分、`getReward` 调 MasterChef（见第 9 节）        |
+| `[StakingRewardsFactory.sol](masterchefv2/StakingRewardsFactory.sol)` | 简化版 Chef + 部署 StakingRewards（见第 9 节）              |
+| `[OtcSwap.sol](masterchefv2/OtcSwap.sol)`                             | xBASE→BASE 固定比例 OTC（见第 10 节）                      |
 | `[Lottery.sol](masterchefv2/Lottery.sol)`                             | 抽奖类合约                                            |
 
 
-### 11.3 `vaultsv2/`
+### 12.3 `vaultsv2/`
 
 
 | 文件                                                                                      | 职责简述                          |
@@ -413,7 +486,7 @@ sequenceDiagram
 | `[farms.json](vaultsv2/farms.json)`                                                     | 前端/运营用农场列表元数据（**非链上配置**）      |
 
 
-### 11.4 其它
+### 12.4 其它
 
 
 | 文件                                 | 职责简述                                      |
@@ -424,7 +497,7 @@ sequenceDiagram
 
 ---
 
-## 12. Solidity 版本与依赖说明
+## 13. Solidity 版本与依赖说明
 
 - 仓库内 **Solidity 版本不统一**：例如 Uniswap 核心多为 **0.5.16**，`masterchefv2` 中 `StakingRewards` 为 **^0.5.16**，`OtcSwap` 为 **^0.8.0**（内嵌 OZ v4 风格片段），`vaultsv2` 部分为 **0.8.12** 等。
 - 部分文件内嵌 **OpenZeppelin** 或大段 **Etherscan 验证用** 扁平化代码；实际部署时常以 npm 依赖为准，学习时以**当前文件内 import 与 pragma** 为准。
@@ -432,21 +505,22 @@ sequenceDiagram
 
 ---
 
-## 13. 学习路径建议
+## 14. 学习路径建议
 
 1. 读 `UniswapV2Pair` 的 `swap` / `mint` / `burn` 与 `lock` 修饰器，理解重入保护与余额检查。
 2. 读 `StakingRewards` 的 `rewardPerToken`、`earned`、`updateReward`、`getReward`。
 3. 读 `MasterchefV2` 的 `mintRewards`、`_updatePool`、`votePool` 与 Owner 管理函数。
-4. 对照 `vaultsv2` 中 `oCOIN` / `xBASE` 与 MasterChef 的交互。
-5. 对照 [`BaseToken.sol`](BaseToken.sol) 与上文第 8 节，理解 BASE 的 Operator 铸币与初始分配。
-6. 阅读 [`masterchefv2/OtcSwap.sol`](masterchefv2/OtcSwap.sol) 与上文第 9 节，理解 xBASE→BASE 的固定比例 OTC 与 Owner 注资。
-7. 阅读 `BaseTokenLocker` 的锁仓/解锁与费用逻辑（见上文第 10 节）。
-8. 对照 [`CoinToken.sol`](CoinToken.sol) 与上文第 7 节，理解 `minters` / Operator 与 Farm 奖励的配合。
-9. 用 `[INTERVIEW_PREP.md](INTERVIEW_PREP.md)` 做闭卷问答，回到源码标出行号加深记忆。
+4. 对照 **上文第 9 节** 与 `masterchefv2` 下 `StakingRewards` / `MasterChefCoin`，建立「Chef 网关 + Farm」整体心智模型。
+5. 对照 `vaultsv2` 中 `oCOIN` / `xBASE` 与 MasterChef 的交互。
+6. 对照 [`BaseToken.sol`](BaseToken.sol) 与上文第 8 节，理解 BASE 的 Operator 铸币与初始分配。
+7. 阅读 [`masterchefv2/OtcSwap.sol`](masterchefv2/OtcSwap.sol) 与上文第 10 节，理解 xBASE→BASE 的固定比例 OTC 与 Owner 注资。
+8. 阅读 `BaseTokenLocker` 的锁仓/解锁与费用逻辑（见上文第 11 节）。
+9. 对照 [`CoinToken.sol`](CoinToken.sol) 与上文第 7 节，理解 `minters` / Operator 与 Farm 奖励的配合。
+10. 用 `[INTERVIEW_PREP.md](INTERVIEW_PREP.md)` 做闭卷问答，回到源码标出行号加深记忆。
 
 ---
 
-## 14. 诚实边界
+## 15. 诚实边界
 
 - 链上部署地址、具体代币经济参数、Owner 多签情况需以**目标网络**的区块浏览器为准。
 - 未附带完整测试套件时，**数学边界、权限组合**应以形式化审查或自建测试为准；本指南不替代安全审计。

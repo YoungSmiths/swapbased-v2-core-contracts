@@ -465,6 +465,14 @@ contract StakingRewards is IStakingRewards, ReentrancyGuard {
 
     /* ========== CONSTRUCTOR ========== */
 
+    /**
+     * @notice 创建单池 Farm：质押 `_stakingToken`，奖励通过 `masterChef.mintRewards` 铸造（非本合约预存）。
+     * @param _masterChef MasterChef 合约地址（须实现 `mintRewards`）
+     * @param _taxWallet 接收 depositFee（1%）与 ownerFee（2% 额外铸币）的地址
+     * @param _stakingToken 用户质押的 ERC20（多为 LP）
+     * @param _rewardRate 初始每秒奖励计量；由 Chef `setRewardRate` 覆盖时为常见路径
+     * @param _farmStartTime 早于该时间 `rewardPerToken` 不累积（挖矿未开始）
+     */
     constructor(
         address _masterChef,
         address _taxWallet,
@@ -510,6 +518,12 @@ contract StakingRewards is IStakingRewards, ReentrancyGuard {
 
     /* ========== MUTATIVE FUNCTIONS ========== */
 
+    /**
+     * @notice 使用 Uniswap V2 风格 `permit` 一步授权并质押，扣 1% depositFee 至 `taxWallet`。
+     * @param amount 转入的质押代币数量（含将支付给 taxWallet 的 fee）
+     * @param deadline permit 截止时间
+     * @param v r s EIP-712 签名分量
+     */
     function stakeWithPermit(uint256 amount, uint deadline, uint8 v, bytes32 r, bytes32 s) external nonReentrant updateReward(msg.sender) {
         require(amount > 0, "Cannot stake 0");
 
@@ -528,6 +542,10 @@ contract StakingRewards is IStakingRewards, ReentrancyGuard {
         emit Staked(msg.sender, amount);
     }
 
+    /**
+     * @notice 质押：从用户转入 `amount`，扣万分比 `depositFee` 至 `taxWallet`，净额计入用户质押权重。
+     * @param amount 质押数量（最小单位）
+     */
     function stake(uint256 amount) external nonReentrant updateReward(msg.sender) {
         require(amount > 0, "Cannot stake 0");
 
@@ -543,6 +561,10 @@ contract StakingRewards is IStakingRewards, ReentrancyGuard {
         emit Staked(msg.sender, amount);
     }
 
+    /**
+     * @notice 取出质押本金（无额外退出费；奖励需另调 `getReward`）。
+     * @param amount 取出数量，不得超过用户在本池余额
+     */
     function withdraw(uint256 amount) public nonReentrant updateReward(msg.sender) {
         require(amount > 0, "Cannot withdraw 0");
         _totalSupply = _totalSupply.sub(amount);
@@ -551,7 +573,10 @@ contract StakingRewards is IStakingRewards, ReentrancyGuard {
         emit Withdrawn(msg.sender, amount);
     }
 
-    /// @notice 将已结算的 rewards 通过 MasterChef 铸给用户，并按 ownerFee 给 taxWallet 额外铸一笔
+    /**
+     * @notice 领取已累积奖励：对用户 `mintRewards` 主奖励，再对 `taxWallet` 铸 `reward * ownerFee / 10000`。
+     * @dev 奖励代币由 MasterChef 按池配置多币种拆分；本处仅传递「计量」`reward`。
+     */
     function getReward() public nonReentrant updateReward(msg.sender) {
         uint256 reward = rewards[msg.sender];
         if (reward > 0) {
@@ -564,6 +589,7 @@ contract StakingRewards is IStakingRewards, ReentrancyGuard {
         }
     }
 
+    /// @notice 先取回全部质押再领取奖励（两笔逻辑在同一交易内顺序执行）。
     function exit() external {
         withdraw(_balances[msg.sender]);
         getReward();
@@ -591,11 +617,19 @@ contract StakingRewards is IStakingRewards, ReentrancyGuard {
 
     /* ========== FARMS CONTROLS ========== */
 
+    /**
+     * @notice 仅 MasterChef 可调：更新每秒奖励速率并刷新 `lastUpdateTime`。
+     * @param _rewardRate 新的每秒奖励计量（与 `rewardPerToken` 积分一致）
+     */
     function setRewardRate(uint256 _rewardRate) public onlyMasterChef {
         rewardRate = _rewardRate;
         lastUpdateTime = block.timestamp;
     }
 
+    /**
+     * @notice 迁移 MasterChef 地址（仅限当前 `taxWallet` 调用，用于升级 Chef）。
+     * @param _masterChef 新 MasterChef 合约地址
+     */
     function setMasterChef(address _masterChef) public {
         require(taxWallet == msg.sender, "Not the owner");
         masterChef = _masterChef;
