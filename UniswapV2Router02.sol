@@ -563,10 +563,13 @@ contract UniswapV2Router02 is IUniswapV2Router02 {
     }
 
     /**
-     * @notice **双 ERC20 加流动性**：从用户拉取代币进 Pair，再 `mint` 把 LP 发给 `to`。
-     * @param to 接收 LP 的地址（常为用户自己或合约）
+     * @notice **双 ERC20 加流动性**：从 **`msg.sender`** 拉取两种代币进 Pair，再 `mint(to)` 把新 LP 发给 **`to`**。
+     * @param to **LP 接收方**，由调用者填写；**不必**等于 `msg.sender`。
      * @return amountA、amountB 实际注入量；liquidity 本次铸造的 LP 数量
-     * @dev **使用场景**：已在钱包授权 Router 两种 token；**核心顺序**：`_addLiquidity` → `transferFrom`×2 → `Pair.mint`。
+     * @dev **扣款 vs 收 LP**：`safeTransferFrom(..., msg.sender, pair, ...)` 只从 **调用者** 扣 `tokenA`/`tokenB`，故 **`approve(Router)` 须由 `msg.sender` 完成**；`Pair.mint(to)` 把 LP 记入 **`to`** 的 `balanceOf`。
+     *      **常见相同**：个人在 UI 加池，填 `to = 本人地址`，此时 `to == msg.sender`。
+     *      **常见不同**：① **金库/多签** 发起交易但希望 LP 记在 `to = 协议金库`；② **聚合/代理合约** 代用户调用且合约自己持有代币时 `msg.sender` 为合约，仍可将 `to` 设为用户 EOA（视业务是否先把币转入合约）；③ **一键发 LP 给合作方** 由付款方调 Router，`to = 合作方地址`。
+     *      **核心顺序**：`_addLiquidity` → `transferFrom`×2（from 均为 `msg.sender`）→ `Pair.mint(to)`。
      */
     function addLiquidity(
         address tokenA,
@@ -586,9 +589,11 @@ contract UniswapV2Router02 is IUniswapV2Router02 {
     }
 
     /**
-     * @notice **ETH + 单币加池**：`msg.value` 作为 ETH 侧 desired，内部 `deposit` 成 WETH 与 `token` 组成 Pair。
+     * @notice **ETH + 单币加池**：`msg.value` 作为 ETH 侧上限；ERC20 从 `msg.sender` 扣；LP 发给 **`to`**（含义同 `addLiquidity`）。
+     * @param to 接收 LP 的地址，可与 `msg.sender` 不同（见 `addLiquidity` 注释）。
      * @return amountToken、amountETH 实际注入的代币与 ETH（WETH 计量）；liquidity 铸造的 LP
-     * @dev **使用场景**：用户在 UI 里拖 ETH + 某山寨币加池；未用完的 `msg.value` 会 **退回** `msg.sender`。
+     * @dev **ETH 与退款**：实际用于 `deposit` 的 ETH 为 `amountETH`，若 `msg.value > amountETH`，**多余原生币退回 `msg.sender`**（与 `to` 无关）。
+     *      **代币侧**：`token` 仍 `transferFrom(msg.sender, pair, amountToken)`，须 **`msg.sender` 已 approve**。
      */
     function addLiquidityETH(
         address token,
@@ -608,9 +613,13 @@ contract UniswapV2Router02 is IUniswapV2Router02 {
         );
         address pair = UniswapV2Library.pairFor(factory, token, WETH);
         TransferHelper.safeTransferFrom(token, msg.sender, pair, amountToken);
+        // deposit：从本合约携带 amountETH 原生币存入 WETH 合约，给本 Router 地址 1:1 增加 WETH 余额（池子只认 ERC20，不认裸 ETH）。
         IWETH(WETH).deposit{value: amountETH}();
+        // transfer(pair)：把等额 WETH 打进 Pair，与上一行已转入的 token 一起形成「两侧增量」，供 mint 使用。
         assert(IWETH(WETH).transfer(pair, amountETH));
+        // mint(to)：Pair 用余额减旧 reserve 算流动性，向 to 铸造 LP（扣款方仍是 msg.sender，收 LP 方为 to）。
         liquidity = IUniswapV2Pair(pair).mint(to);
+        // refund：若用户附带的 msg.value 大于实际注入的 amountETH，多余 wei 退回 msg.sender（ETH 找零与 to 无关）。
         // refund dust eth, if any
         if (msg.value > amountETH) TransferHelper.safeTransferETH(msg.sender, msg.value - amountETH);
     }
@@ -708,11 +717,19 @@ contract UniswapV2Router02 is IUniswapV2Router02 {
     }
 
     // **** REMOVE LIQUIDITY (supporting fee-on-transfer tokens) ****
+    // 「转账扣税」代币说明：链上**没有**由 Router 维护的白名单；是否扣税完全由**该 token 合约**在 transfer 里实现。
+    // 常见含费类型：项目自定义买卖/转账税（营销、回流 LP、销毁）、部分反射/重基类代币；**标准 USDC、WETH、未改动的 OZ ERC20** 等通常转账全额到账。
+    // 识别方式：读代币源码或文档、区块浏览器小额试转对比 balance；本合约无法自动判断某地址是否为税币。
 
     /**
      * @notice **撤 ETH 池（支持转账抽税代币）**：`burn` 后不把 `amountToken` 当确定值，而是把 Router 持有的该 token **余额全转** `to`。
      * @return amountETH 仍按 WETH 计量返回（非税币侧）
-     * @dev **为何存在**：部分代币 `transfer` 时扣费，Pair `burn` 算出的 amount 与实际到账不一致；用 `balanceOf` 可避免卡死。
+     * @dev **哪些代币会 transfer 扣税**：无固定列表；由**各代币合约**自行实现（常见为项目税、反射币等，见本节上方行注释）。主流稳定币与规范 ERC20 通常不扣。
+     *      **为何存在（「卡死」= 整笔交易 revert，用户撤不出池）**：
+     *      标准 `removeLiquidityETH` 在 `burn` 后会 `safeTransfer(token, to, amountToken)`，`amountToken` 来自 Pair 公式。
+     *      若该 token **转出即扣税**（fee-on-transfer），Pair → Router 实际到账可能 **少于** `amountToken`（例如名义 1000、扣 10% 后 Router 仅 900），
+     *      再按 **1000** 转给用户会因余额不足而 **revert**，撤池一直失败。
+     *      本函数改为 `safeTransfer(token, to, balanceOf(this))`，只转**实有余额**，避免上述情况。
      *      **代价**：返回值中 token 侧不保证等于内部 `amountToken` 变量，仅保证 ETH 侧 min 已通过 `removeLiquidity` 检查。
      */
     function removeLiquidityETHSupportingFeeOnTransferTokens(
@@ -732,6 +749,7 @@ contract UniswapV2Router02 is IUniswapV2Router02 {
             address(this),
             deadline
         );
+        // 税币：Pair 已把 token 打进本合约，但到账可能少于 burn 返回值；按「实有余额」一次转给 to，避免按名义 amount 转出导致余额不足 revert。
         TransferHelper.safeTransfer(token, to, IERC20(token).balanceOf(address(this)));
         IWETH(WETH).withdraw(amountETH);
         TransferHelper.safeTransferETH(to, amountETH);
@@ -909,10 +927,12 @@ contract UniswapV2Router02 is IUniswapV2Router02 {
     }
 
     // **** SWAP (supporting fee-on-transfer tokens) ****
+    // 税币范围同「撤池」一节：仅指在 transfer 中**非 1:1 到账**的代币；须用户/前端按合约地址自行判断，Router 不枚举。
 
     /**
      * @notice 税币 / 反射币专用多跳：不预先信任 `getAmountsOut` 的数值，每一跳用 **Pair 实际余额 − reserve** 作为输入再算输出。
      * @dev **与 `_swap` 区别**：标准 swap 假设转入额=计划值；抽税代币到账变少会导致 K 校验失败或金额不准，故用链上实测输入。
+     *      **涉及哪些代币**：见本节上行注释；与「项目方自定义税/反射」类同源，**非** USDC/WETH 等标准币的默认行为。
      */
     function _swapSupportingFeeOnTransferTokens(address[] memory path, address _to) internal virtual {
         for (uint i; i < path.length - 1; i++) {

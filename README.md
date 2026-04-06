@@ -231,6 +231,26 @@ Uniswap V2 在 `UniswapV2Pair._update` 里维护两个**公开**累计量（见 
 | 报价（纯/视图） | `quote`、`getAmountOut`、`getAmountIn`、`getAmountsOut`、`getAmountsIn` | 单跳公式与多跳路径模拟；前端/套利常用。 |
 | 内部（Router 内） | `_addLiquidity`、`_swap`、`_swapSupportingFeeOnTransferTokens` | 被上述外部函数调用；串联 Pair.`swap`。 |
 
+#### `addLiquidity` / `addLiquidityETH`：`msg.sender` 与参数 `to`
+
+**链上分工（必须区分）**
+
+| 概念 | 含义 |
+| --- | --- |
+| **`msg.sender`** | 当前调用 Router 的地址。两种 ERC20 均 `transferFrom(msg.sender, pair, …)`，故 **`approve(Router, …)` 必须由 `msg.sender` 授权**（谁出币谁授权）。 |
+| **`to`** | `Pair.mint(to)` 的收款方，即 **新铸 LP 记入谁的 `balanceOf`**，由调用者在参数里**显式传入**。 |
+
+**二者无强制相等**：`to` **不是** `msg.sender` 的别名；仅当调用者把 `to` 填成自己地址时才有 `to == msg.sender`。
+
+**实际案例**
+
+1. **最常见 · 个人直连 DEX**：Alice 用钱包调 `addLiquidity(..., to = Alice)` → 币从 Alice 扣、LP 进 Alice；**`to == msg.sender`**。
+2. **金库做市**：协议多签合约 `Treasury` 持有 WETH/BASE 并已 `approve` Router，调用 `addLiquidity(..., to = Treasury)` → **`msg.sender = Treasury`**，LP 留在金库地址，便于统一治理；若误填 `to = 个人` 则 LP 会发到个人（属参数错误，非合约替你改 `to`）。
+3. **代付/送礼式加池**：Bob 出全部两种币并授权 Router，但希望 LP 记在合伙人 Carol 名下 → `msg.sender = Bob`，**`to = Carol`**；Carol **无需**出币，但会收到 LP（需 Bob 主动这样调，且 Carol 信任 Bob）。
+4. **`addLiquidityETH`**：原生 ETH 来自本笔交易的 **`msg.value`**（付款方即 `msg.sender`）；`token` 仍从 **`msg.sender`** `transferFrom`；**LP 发给 `to`**。若 `msg.value` 大于实际用到的 ETH，**找零退回 `msg.sender`**，与 `to` 无关。
+
+**实现引用**：`[UniswapV2Router02.sol](UniswapV2Router02.sol)` 中 `addLiquidity`、`addLiquidityETH`。
+
 ---
 
 ### 5.3 统一业务设定（后续各节共用）

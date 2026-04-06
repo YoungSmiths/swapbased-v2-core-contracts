@@ -41,7 +41,7 @@ contract UniswapV2Pair is IUniswapV2Pair, UniswapV2ERC20 {
     uint112 private reserve0;
 
     /// @notice token1 在池内记账余额。
-    uint112 private reserve1;
+    uint112 private reserve1; 
 
     /// @notice 最近一次 `_update` 时的区块时间戳（uint32 截断，与 Uniswap 一致用于 TWAP 时间差）。
     uint32  private blockTimestampLast;
