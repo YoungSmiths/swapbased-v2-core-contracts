@@ -566,13 +566,16 @@ contract Lottery is ReentrancyGuard {
 
     /* Lottery Functions */
 
+    /// @notice 基于质押权重随机选择用户：用于开奖选出中奖者
+    /// @param playerPosition 随机种子位置
+    /// @param totalWeight 总权重（全员质押量和）
+    /// @return 0 到 totalWeight-1 的随机数
     function random(uint playerPosition, uint totalWeight) private view returns (uint256) {
         return
             uint256(
                 keccak256(
                     abi.encodePacked(
-                        // block.difficulty,
-                        block.prevrandao,
+                        block.prevrandao, // block.difficulty 已废弃，改用 prevrandao
                         block.timestamp,
                         playerPosition
                     )
@@ -580,21 +583,21 @@ contract Lottery is ReentrancyGuard {
             ) % totalWeight;
     }
 
+    /// @notice 计算 jackpot 奖励比例：随机选择 2%-100% 之间
+    /// @return 奖励比例（万分比）
     function getRandomJackpotAmount() private view returns (uint256) {
-    uint256 randomNumber = random(0, STEP_PRECISION_DIVIDER);
-
-    // Calculate the jackpot amount based on probability and range
-    if (randomNumber < JACKPOT_ENABLED_MAX_WIN_CHANCE) {
-        return JACKPOT_ENABLED_MAXIMUM_REWARD;
-    } else {
-        // Calculate a random amount between the minimum and maximum reward
-        uint256 min = JACKPOT_ENABLED_MINIMUM_REWARD;
-        uint256 max = JACKPOT_ENABLED_MAXIMUM_REWARD;
-        uint256 range = max - min + 1;
-        return min + (randomNumber % range);
+        uint256 randomNumber = random(0, STEP_PRECISION_DIVIDER);
+        if (randomNumber < JACKPOT_ENABLED_MAX_WIN_CHANCE) {
+            return JACKPOT_ENABLED_MAXIMUM_REWARD;
+        } else {
+            uint256 min = JACKPOT_ENABLED_MINIMUM_REWARD;
+            uint256 max = JACKPOT_ENABLED_MAXIMUM_REWARD;
+            uint256 range = max - min + 1;
+            return min + (randomNumber % range);
+        }
     }
-}
 
+    /// @notice 开奖：按质押权重随机选出中奖者，发日奖池 + jackpot；扣手续费并更新奖池。
     function resetRound() external publicCanExecuteOrResetManager nonReentrant {
         require(block.timestamp >= nextRound, "Can only reset round after this one is over.");
         uint256[] memory winningPlayers = getRandomUsers(wagerPlayers.length >= maximumWinners ? maximumWinners : wagerPlayers.length);

@@ -438,24 +438,101 @@ contract StakingRewards is IStakingRewards, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     /* ========== STATE VARIABLES ========== */
+    /**
+     * @notice MasterChef 合约地址。
+     * @dev 核心控制器。本合约通过调用 MasterChef 的 `mintRewards` 来实际铸造和发放奖励。
+     * @example 场景：当用户调用 `getReward()` 时，本合约会请求 `masterChef` 向用户增发奖励代币。
+     */
     address public masterChef;
+
+    /**
+     * @notice 税收/协议收入接收钱包地址。
+     * @dev 用于接收质押手续费 (depositFee) 和额外的协议管理费 (ownerFee)。
+     * @example 场景：用户质押 100 LP 时，1 LP (1%) 会被直接发送到 `taxWallet`。
+     */
     address public taxWallet;
-    IERC20 public rewardsToken; // 与经典 StakingRewards 兼容的字段；实际发奖走 MasterChef.mintRewards
+
+    /**
+     * @notice 奖励代币合约实例。
+     * @dev 虽然定义了此变量以保持与经典 Synthetix 模式兼容，但实际奖励发放逻辑通常由 MasterChef 统一处理。
+     */
+    IERC20 public rewardsToken;
+
+    /**
+     * @notice 用户质押的代币合约实例（通常是 Uniswap V2 LP Token）。
+     * @dev 决定了本池子“挖矿”所需的本金类型。
+     * @example 场景：在 BASE/ETH 池中，`stakingToken` 就是 BASE-ETH LP 代币。
+     */
     IERC20 public stakingToken;
+
+    /**
+     * @notice 当前奖励周期的结束时间戳。
+     * @dev 预留字段，用于标识本轮奖励排放何时停止。
+     */
     uint256 public periodFinish = 0;
+
+    /**
+     * @notice 每秒发放的奖励计量速率（单位：wei/秒）。
+     * @dev 决定了矿池的“产出速度”。
+     * @example 举例：若 `rewardRate` 为 1e18，则全池用户每秒共同瓜分 1 个单位的奖励计量。
+     */
     uint256 public rewardRate = 0;
+
+    /**
+     * @notice 最近一次更新全局奖励积分的时间戳。
+     * @dev 用于计算从上次更新到现在这段时间内产生的奖励总量。
+     */
     uint256 public lastUpdateTime;
+
+    /**
+     * @notice 每单位质押代币累积的全局奖励积分（已存储值）。
+     * @dev 核心算法：该值会随时间增加，增量 = (经过的时间 * rewardRate) / 总质押量。
+     */
     uint256 public rewardPerTokenStored;
+
+    /**
+     * @notice 挖矿正式开始的时间戳。
+     * @dev 在此时间之前，即使有质押，也不会产生任何奖励积分。
+     * @example 场景：项目宣布明天 10:00 开始挖矿，则 `farmStartTime` 设置为该时间，防止“偷跑”。
+     */
     uint256 public farmStartTime;
 
+    /**
+     * @notice 记录每个用户已结算（已支付）的奖励积分。
+     * @dev 用于计算用户从上次操作到现在新产生的奖励：`balance * (全局积分 - 用户已付积分)`。
+     */
     mapping(address => uint256) public userRewardPerTokenPaid;
+
+    /**
+     * @notice 记录每个用户当前已存入但未领取的奖励数量。
+     * @dev 当用户质押或取款时，未领取的奖励会从积分形式结算并累加到这个变量中。
+     */
     mapping(address => uint256) public rewards;
 
+    /**
+     * @notice 全池总质押量。
+     * @dev 用于计算奖励分配的权重。
+     */
     uint256 private _totalSupply;
+
+    /**
+     * @notice 每个用户的质押余额映射。
+     * @dev 决定了每个用户在奖励分配中所占的份额。
+     */
     mapping(address => uint256) private _balances;
 
-    // Owner fee
+    /**
+     * @notice 协议额外收取的管理费比例（万分比）。
+     * @dev 当用户领取奖励时，MasterChef 会额外铸造 `reward * 2%` 给 `taxWallet`。
+     * @example 举例：用户领取 1000 奖励，协议会额外产生 20 给团队。
+     */
     uint256 public constant ownerFee = 200; // 2%
+
+    /**
+     * @notice 质押手续费比例（万分比）。
+     * @dev 用户存入时扣除。
+     * @example 举例：用户存 10000，实际入账 9900，100 作为手续费。
+     */
     uint256 public constant depositFee = 100; // 1%
 
     modifier onlyMasterChef() {
