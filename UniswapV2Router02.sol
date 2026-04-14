@@ -364,9 +364,16 @@ library UniswapV2Library {
      * @param reserveIn 输入币在池内的储备
      * @param reserveOut 输出币在池内的储备
      * @return amountOut 输出币数量（整除向下取整）
-     * @dev **核心逻辑**：Uniswap V2 标准推导
-     *      \(\text{amountOut} = \dfrac{997 \cdot \text{amountIn} \cdot \text{reserveOut}}{1000 \cdot \text{reserveIn} + 997 \cdot \text{amountIn}}\)。
-     *      与 `Pair.swap` 中 K 校验一致。
+     * @dev **公式推导（与 `UniswapV2Pair.swap` 的 K 校验一致）**：
+     *      1. **恒定乘积**：交换前后储备满足 \((x + \Delta x_{\text{eff}})(y - \Delta y) = xy\)，此处 \(x=\texttt{reserveIn}\)，\(y=\texttt{reserveOut}\)，\(\Delta y=\texttt{amountOut}\)。
+     *      2. **0.3% 费在输入侧**：用户打入 `amountIn`，只有 \(\frac{997}{1000}\) 计入「有效增量」参与乘积，即 \(\Delta x_{\text{eff}} = \texttt{amountIn} \cdot \frac{997}{1000}\)（另 \(\frac{3}{1000}\texttt{amountIn}\) 视为手续费留在池内，不进入该乘积等式右侧的 \(xy\) 比较方式与 Pair 实现一致）。
+     *      3. **代入**：\((\texttt{reserveIn} + \texttt{amountIn}\cdot\frac{997}{1000})(\texttt{reserveOut} - \texttt{amountOut}) = \texttt{reserveIn}\cdot\texttt{reserveOut}\)。
+     *      4. **解 \(\texttt{amountOut}\)**：由 \(\texttt{reserveOut} - \texttt{amountOut} = \dfrac{\texttt{reserveIn}\cdot\texttt{reserveOut}}{\texttt{reserveIn} + \texttt{amountIn}\cdot\frac{997}{1000}}\)，得
+     *         \(\texttt{amountOut} = \texttt{reserveOut} - \dfrac{\texttt{reserveIn}\cdot\texttt{reserveOut}}{\texttt{reserveIn} + \texttt{amountIn}\cdot\frac{997}{1000}}
+     *         = \dfrac{\texttt{reserveOut}\cdot\texttt{amountIn}\cdot\frac{997}{1000}}{\texttt{reserveIn} + \texttt{amountIn}\cdot\frac{997}{1000}}\)。
+     *      5. **整数实现**：分子分母同乘 \(1000\) 消去分式，即
+     *         \(\texttt{amountOut} = \dfrac{997\cdot\texttt{amountIn}\cdot\texttt{reserveOut}}{1000\cdot\texttt{reserveIn} + 997\cdot\texttt{amountIn}}\)，
+     *         对应代码 `numerator = amountIn*997*reserveOut`，`denominator = reserveIn*1000 + amountIn*997`，最后 **向下取整**。
      *      **使用场景**：`swapExact*`、`getAmountsOut` 每一跳；前端展示「我卖 X 能买多少 Y」。
      *      **实例**：深池里卖 10,000 USDC，`amountOut` 略小于用现货价 `quote` 算出的值（因 997/1000）。
      */
@@ -376,7 +383,7 @@ library UniswapV2Library {
         uint amountInWithFee = amountIn.mul(997);
         uint numerator = amountInWithFee.mul(reserveOut);
         uint denominator = reserveIn.mul(1000).add(amountInWithFee);
-        amountOut = numerator / denominator;
+        amountOut = numerator / denominator; // 本质上是：Δy = y *( Δx / (Δx + x))
     }
 
     /**

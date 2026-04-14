@@ -31,7 +31,7 @@
 | **9**  | Chef + Farm      | 控权铸币、StakingRewards；**§9.5.4 MasterChefCoin 深度** | **B、C**              |
 | **10** | OtcSwap          | xBASE→BASE OTC                                     | 与 **§8/§12** 衔接      |
 | **11** | BaseTokenLocker  | LP 锁仓与费用                                           | 工具层                  |
-| **12** | Vaults v2（详解）    | 与 Chef 衔接、单币池差异；**§12.5** xBASE、**§12.6** oCOIN 专节 | **D、F1**             |
+| **12** | Vaults v2（详解）    | **§12.0** 常见 Vesting 模式（通识表）；与 Chef 衔接、单币池差异；**§12.5** xBASE、**§12.6** oCOIN 专节 | **D、F1**             |
 | **13** | 合约地图             | 按目录速查文件；**§13.1.1** 说明 `interfaces/` 与 ABI         | 定位源码                 |
 | **14** | Solidity 与依赖     | 版本、扁平化代码                                           | **E3**               |
 | **15** | 学习路径建议           | 推荐阅读顺序                                             | 与 **§0.3** 一致        |
@@ -183,6 +183,47 @@ Uniswap V2 在 `UniswapV2Pair._update` 里维护两个**公开**累计量（见 
 
 5. **和瞬时价的区别**  
    储备比 `reserve1/reserve0` 是**瞬时现货**；TWAP 是对一段时间内的价格**按时间积分再平均**，更难被单笔大单在短窗口内操纵（仍须注意预言机延迟与 MEV 等工程问题）。
+
+#### `getAmountOut` 公式：从「占比直觉」到 Router 整数实现
+
+`[UniswapV2Router02.sol](UniswapV2Router02.sol)` 中的单跳输出量与 **恒定乘积**、**0.3% 从输入侧扣费** 一致。下面用符号 \(x=\texttt{reserveIn}\)、\(y=\texttt{reserveOut}\)、\(\Delta x=\texttt{amountIn}\)、\(\Delta y=\texttt{amountOut}\)（与源码命名对应）。
+
+**1. 无手续费时的结构（理解「为什么是加在分母上」）**
+
+交换前后满足 \((x+\Delta x)(y-\Delta y)=xy\)（用户**打入** \(\Delta x\)、**取出** \(\Delta y\)，故一边加、一边减）。两边消去 \(xy\) 后整理得 \(y\Delta x = (x+\Delta x)\Delta y\)，因此
+
+\[
+\Delta y = y \cdot \frac{\Delta x}{x+\Delta x}.
+\]
+
+直觉上：\(\frac{\Delta x}{x+\Delta x}\) 是「新池子里输入侧增量占交换**后**输入侧总储备的比例」，输出侧按同结构从 \(y\) 里划出对应份额。分母是 \(x+\Delta x\) 而不是只含 \(x\)，因为滑点来自「池子先变大再给你输出」的整体几何平均，不是现货价 \(y/x\) 的一次线性近似。
+
+**2. 把 \(\Delta x\) 与 \(x\) 按 1000 份理解手续费**
+
+Uniswap V2 对**输入量**收 **0.3%**：把 \(\Delta x\) 看成 **1000 份**，其中 **3 份**为手续费、**997 份**参与恒定乘积里的「有效增量」。记
+
+\[
+\Delta x_{\text{eff}} = \frac{997}{1000}\,\Delta x.
+\]
+
+在 **1.** 的公式里用 \(\Delta x_{\text{eff}}\) 代替原来的 \(\Delta x\)（\(x\) 仍是交换前储备，未拆成 1000 份；拆份的是**本次打入的 \(\Delta x\)**）：
+
+\[
+\Delta y = y \cdot \frac{\Delta x_{\text{eff}}}{x+\Delta x_{\text{eff}}}
+= y \cdot \frac{997\,\Delta x}{997\,\Delta x + 1000\,x}.
+\]
+
+这就是你说的「\(x\) 和 \(\Delta x\) 分成 1000 份，3 份 \(\Delta x\) 作 fee，只有 997 份进入乘积」后整理成的形式；与「先写 \(\Delta y = y \cdot \frac{\Delta x}{\Delta x + x}\) 再代入 \(\Delta x_{\text{eff}}\)」**等价**。
+
+**3. 链上整数写法（与源码一行对一行）**
+
+为避免小数，分子分母同乘 \(1000\) 后等价于：
+
+\[
+\Delta y = \frac{997\cdot \Delta x \cdot y}{1000\cdot x + 997\cdot \Delta x},
+\]
+
+对应 `getAmountOut`：`amountInWithFee = amountIn * 997`，`numerator = amountInWithFee * reserveOut`，`denominator = reserveIn * 1000 + amountInWithFee`，最后 Solidity 整数除法**向下取整**。与 `[UniswapV2Pair.sol](UniswapV2Pair.sol)` 里 `swap` 的 K 校验（`balance * 1000 - amountIn * 3` 形式）是同一套代数。
 
 以下 **§5.2** 列出本仓库四合约中**所有对外可调用函数/自动 getter**（含 Pair 继承的 ERC20）；**§5.3～5.8** 用**同一套业务角色与数值**串联调用，保证每个函数至少出现一次并说明数据关系。
 
@@ -1063,6 +1104,17 @@ sequenceDiagram
 ## 12. Vaults v2（xBASE / oCOIN / 单币质押）
 
 `[vaultsv2/](vaultsv2/)` 与 `[masterchefv2/](masterchefv2/)` **无源码 import 依赖**，通过部署时写入 `**masterChef` 地址**与 代币地址 对接：衍生代币合约（xBASE、oCOIN）在 claim / instantExit 等路径调用 `**IMasterChef.mintRewards`**；单币质押合约则与 `StakingRewards` 同构，由 **Chef 或简化工厂** 控制 `**setRewardRate`** 与 **铸币**。Solidity **0.8.12**（xBASE、oCOIN）与 **^0.5.16**（`SingleStakingRewards*`）并存。
+
+### 12.0 常见 Vesting 模式（行业通识）
+
+下表为代币分配、期权与激励里常见的 **Vesting（归属/释放）** 说法，便于和文档、投资人条款对齐。**本仓库**里 xBASE / oCOIN 的 `vest` 路径多为：**锁定期内代币已销毁或记入仓位，到期后一次性 `claim` 结算**（见 **§12.5 / §12.6**），链上**未必**实现「每秒线性释放」的会计，但产品沟通仍常借用下表分类。
+
+| 模式 | 说明 | 适用场景 |
+| --- | --- | --- |
+| **线性释放（Linear）** | 按时间平均释放，例如每月释放 1/24 | 团队、投资人、社区奖励 |
+| **阶梯释放（Step）** | 按阶段释放，例如每 6 个月释放 25% | 项目里程碑解锁 |
+| **Cliff + 线性** | 先锁仓 N 个月（cliff 期），到期后再线性释放 | 最常用，防止早期砸盘 |
+| **即时释放（No Vesting）** | 无锁仓，到账即可提 | 流动性挖矿、散户奖励补充 |
 
 ### 12.1 业务场景与实例
 
