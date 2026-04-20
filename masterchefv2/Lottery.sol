@@ -413,28 +413,47 @@ contract Lottery is ReentrancyGuard {
 
     /* ========== STATE VARIABLES ========== */
 
+    /// @notice 单轮开奖快照：用于前端“历史开奖记录”与链下对账。
     struct Round {
+        /// @notice 轮次编号（等于创建该轮时的 `rounds.length`）。
         uint256 roundId;
+        /// @notice 中奖用户在 `wagerPlayers` 数组中的索引列表（便于还原当时权重抽样结果）。
         uint256[] winningPlayers;
+        /// @notice 中奖地址列表（前端通常直接展示这组地址，而不是索引）。
         address[] winningPlayersAddresses;
+        /// @notice 本轮开奖前的日奖池金额（用于计算前 100 名派奖）。
         uint256 dailyPot;
+        /// @notice 本轮开奖前的 jackpot 总池余额（开奖前快照）。
         uint256 jackpotTotal;
+        /// @notice 本轮从 `dailyPot` 实际已支付出去的总额（便于核对剩余奖池）。
         uint256 dailyPotPaidSum;
+        /// @notice 本轮是否触发 jackpot 事件。
         bool jackpotEnabled;
+        /// @notice 本轮 jackpot 实际支付额（未触发时为 0）。
         uint256 jackpotPaidSum;
+        /// @notice 本轮 jackpot 获胜地址（未触发时可能为零地址）。
         address jackpotWinner;
+        /// @notice 本轮统计到的总投注/总质押权重（用于看参与热度）。
         uint256 totalWagered;
+        /// @notice 本轮结算时间戳（前端可据此显示“开奖时间”）。
         uint256 roundTimestamp;
     }
 
+    /// @notice 用户普通奖项历史记录（第 1~100 名的日奖池派奖）。
     struct UserStatsGeneral {
+        /// @notice 中奖发生的轮次编号。
         uint256 roundIdWon;
+        /// @notice 该轮奖项位次（0 表示第 1 名，1 表示第 2 名，以此类推）。
         uint256 roundIdPrizeId;
+        /// @notice 本次普通奖项实际到手金额。
         uint256 totalWon;
     }
 
+    /// @notice 用户 jackpot 历史记录（仅记录触发 jackpot 的中奖）。
     struct UserStatsJackpot {
+        /// @notice jackpot 中奖发生的轮次编号。
         uint256 roundIdWon;
+        /// @notice 本次 jackpot 实际到手金额。
         uint256 totalJackpotWon;
     }
 

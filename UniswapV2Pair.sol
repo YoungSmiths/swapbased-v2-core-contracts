@@ -92,7 +92,8 @@ contract UniswapV2Pair is IUniswapV2Pair, UniswapV2ERC20 {
      * @param to 收款地址
      * @param value 转账数量（wei）
      */
-    function _safeTransfer(address token, address to, uint value) private {
+    function _safeTransfer(address token, address to, uint value) private { 
+        //SELECTOR = bytes4(keccak256(bytes('transfer(address,uint256)')))
         (bool success, bytes memory data) = token.call(abi.encodeWithSelector(SELECTOR, to, value));
         require(success && (data.length == 0 || abi.decode(data, (bool))), 'UniswapV2: TRANSFER_FAILED');
     }
@@ -180,7 +181,16 @@ contract UniswapV2Pair is IUniswapV2Pair, UniswapV2ERC20 {
                 uint rootK = Math.sqrt(uint(_reserve0).mul(_reserve1));
                 uint rootKLast = Math.sqrt(_kLast);
                 if (rootK > rootKLast) {
-                    // 行级：总供给 * (sqrt(K)-sqrt(K_last)) / (5*sqrt(K)+sqrt(K_last)) → 应铸给 feeTo 的 LP 份额（推导见 Uniswap 白皮书）
+                    /*
+                     * 协议费铸 LP（Uniswap V2 白皮书）：把 sqrt(K) 相对上次 kLast 的**增长**里的一部分铸给 feeTo，
+                     * 设计目标等价于对「流动性增长」抽 **1/6**（不是对单笔 swap 费乘 5）。
+                     *
+                     * 为何分母是 5*rootK + rootKLast（出现系数 5）？
+                     * 在恒定乘积与 LP 供给关系下，若要求**新增**流动性里 1/6 给协议、5/6 归原 LP，可推导出
+                     * 铸给 feeTo 的闭式：totalSupply * (rootK - rootKLast) / (5*rootK + rootKLast)。
+                     * 5 与 1 来自「六分里五份归池、一份归协议」在公式里的体现，故 rootK 带系数 5、rootKLast 带系数 1。
+                     * 完整推导见 Uniswap V2 白皮书协议费章节。
+                     */
                     uint numerator = totalSupply.mul(rootK.sub(rootKLast));
                     uint denominator = rootK.mul(5).add(rootKLast);
                     uint liquidity = numerator / denominator;
@@ -276,9 +286,35 @@ contract UniswapV2Pair is IUniswapV2Pair, UniswapV2ERC20 {
      */
     // 先按输出量乐观转账，再可选回调 uniswapV2Call，最后根据实际转入量校验 K（含 0.3% 费）
     function swap(uint amount0Out, uint amount1Out, address to, bytes calldata data) external lock {
+        /*
+         * -------------------------------------------------------------------------
+         * 【数值走查示例｜仅文档，非链上打印】用 token0 换 token1：Router 已先把输入 token0 转入本 Pair。
+         *
+         * 调用 swap **之前**（上一笔 _update 后的记账 & 转入后余额）：
+         *   _reserve0 = 1000          // 旧储备 token0
+         *   _reserve1 = 2000          // 旧储备 token1
+         *   用户已转入 token0 = 100   // Router transferFrom 已完成
+         *   故 Pair 余额：balance0 = 1000 + 100 = 1100，balance1 = 2000
+         *
+         * 本笔入参示例：
+         *   amount0Out = 0            // 不向外转 token0
+         *   amount1Out = 181          // 与 getAmountOut(100, 1000, 2000) 一致（整除）
+         *   to = 某用户地址（≠ token0/token1）
+         *   data = ""                 // 不触发闪电贷回调
+         *
+         * 执行顺序与关键量变化（与下行注释「例：」一一对应）：
+         *   getReserves() 后：_reserve0=1000，_reserve1=2000（仍为 swap 前记账）
+         *   _safeTransfer(token1→to,181) 后：balance0=1100，balance1=1819
+         *   amount0In = 1100 - (1000 - 0) = 100
+         *   amount1In = 0（token1 无额外净流入）
+         *   balance0Adjusted = 1100*1000 - 100*3 = 1099700；balance1Adjusted = 1819*1000
+         *   K：balance0Adjusted * balance1Adjusted >= 1000*2000*1000^2
+         *   _update：reserve 同步为 balance0=1100、balance1=1819
+         * -------------------------------------------------------------------------
+         */
         require(amount0Out > 0 || amount1Out > 0, 'UniswapV2: INSUFFICIENT_OUTPUT_AMOUNT');
-        (uint112 _reserve0, uint112 _reserve1,) = getReserves(); // gas savings
-        require(amount0Out < _reserve0 && amount1Out < _reserve1, 'UniswapV2: INSUFFICIENT_LIQUIDITY');
+        (uint112 _reserve0, uint112 _reserve1,) = getReserves(); // gas savings；例：_reserve0=1000，_reserve1=2000
+        require(amount0Out < _reserve0 && amount1Out < _reserve1, 'UniswapV2: INSUFFICIENT_LIQUIDITY'); // 例：0<1000 且 181<2000
 
         uint balance0;
         uint balance1;
@@ -288,28 +324,67 @@ contract UniswapV2Pair is IUniswapV2Pair, UniswapV2ERC20 {
         // 行级：禁止输出直接打到 token 合约地址，避免破坏余额会计
         require(to != _token0 && to != _token1, 'UniswapV2: INVALID_TO');
         // 行级：乐观发送：先让用户/回调方拿到输出，再在下面检查输入是否到账
-        if (amount0Out > 0) _safeTransfer(_token0, to, amount0Out); // optimistically transfer tokens
-        if (amount1Out > 0) _safeTransfer(_token1, to, amount1Out); // optimistically transfer tokens
+        if (amount0Out > 0) _safeTransfer(_token0, to, amount0Out); // optimistically transfer tokens；例：amount0Out=0 跳过
+        if (amount1Out > 0) _safeTransfer(_token1, to, amount1Out); // optimistically transfer tokens；例：转出 181，余额 token1: 2000→1819
         // 行级：闪电贷/套利合约在此还款或继续调外部 DEX（实例：先借 USDC，再去 Uniswap 卖成 ETH）
-        if (data.length > 0) IUniswapV2Callee(to).uniswapV2Call(msg.sender, amount0Out, amount1Out, data);
+        if (data.length > 0) IUniswapV2Callee(to).uniswapV2Call(msg.sender, amount0Out, amount1Out, data); // 例：data 空，不执行
         // 行级：转账与回调结束后读取真实余额，用于推导「实际输入量」
-        balance0 = IERC20(_token0).balanceOf(address(this));
-        balance1 = IERC20(_token1).balanceOf(address(this));
+        balance0 = IERC20(_token0).balanceOf(address(this)); // 例：1100（含已转入的 100 个 token0）
+        balance1 = IERC20(_token1).balanceOf(address(this)); // 例：1819
         }
-        // 行级：实际净流入 = 当前余额 − (旧储备 − 已转出)；单边输入时另一边为 0
-        uint amount0In = balance0 > _reserve0 - amount0Out ? balance0 - (_reserve0 - amount0Out) : 0;
-        uint amount1In = balance1 > _reserve1 - amount1Out ? balance1 - (_reserve1 - amount1Out) : 0;
+        /*
+         * 【一】推算 amount0In / amount1In（本笔里各侧「多出来的净流入」——不是 amount0Out）
+         *
+         * 【易混点 1】此时 balance0 往往 **不等于** _reserve0：
+         *   _reserve0 是**上一笔 _update 写入的记账储备**，在本笔 swap 里**先读入** _reserve0/_reserve1（L307），
+         *   但 Router 的正常顺序是：**先把输入代币 transfer 进 Pair**，再调 swap。
+         *   因此读到 balance0（L323）时，常常已是「旧储备 + 用户刚打进来的输入」，而 _reserve0 **还没在本笔里更新**（要到 L359 _update 才对齐）。
+         *   例：_reserve0=1000，用户先打入 100 token0，再 swap → balance0=1100，**不是** 1000。
+         *
+         * 【易混点 2】amount0In **不是** amount0Out，也不满足「amount0In = amount0Out」：
+         *   - amount0Out：从池子**转给** to 的 token0 数量（输出侧）。
+         *   - amount0In：本侧**净转入**池子的 token0 数量（输入侧），由余额与「无输入时应有余额」相减得到。
+         *   公式展开：amount0In = balance0 - (_reserve0 - amount0Out)。
+         *   若本侧**根本没有**新 token0 打入，只有 token0 被转走，则 balance0 = _reserve0 - amount0Out，
+         *   代入得 amount0In = 0（不会等于 amount0Out）。
+         *
+         * 【反向场景】用 token1 买 token0：amount0Out>0，amount1Out=0。
+         *   Router 先转入 token1，再 swap。转出 amount0Out 个 token0 后：
+         *   balance0 = _reserve0 - amount0Out（没有新 token0 进池）→ amount0In = 0。
+         *   balance1 = _reserve1 +（用户打入的 token1）→ amount1In > 0。
+         *   require(amount0In>0 || amount1In>0) **由 amount1In 通过**，不会仅因 amount0Out>0 就 INSUFFICIENT_INPUT_AMOUNT。
+         *
+         * 【公式在说什么】「若完全没人向池子转入代币」，则转出后余额应恰好是 (_reserve0 - amount0Out)、(_reserve1 - amount1Out)。
+         *   实际余额**高于**该值的部分，记为该侧净流入 amount0In / amount1In（三元避免无输入时数值边界被算成正数）。
+         */
+        // 行级：等价于 max(0, balance0 - (_reserve0 - amount0Out))
+        uint amount0In = balance0 > _reserve0 - amount0Out ? balance0 - (_reserve0 - amount0Out) : 0; // 例：100
+        uint amount1In = balance1 > _reserve1 - amount1Out ? balance1 - (_reserve1 - amount1Out) : 0; // 例：0
         require(amount0In > 0 || amount1In > 0, 'UniswapV2: INSUFFICIENT_INPUT_AMOUNT');
+        /*
+         * 【二】K 校验 + 0.3% 手续费（与 UniswapV2Library.getAmountOut 的 997/1000 一致）
+         *
+         * 目标：在**不降低**「扣费后的恒定乘积」的前提下完成 swap。池子费从**输入代币**里扣 3/1000。
+         * 实现上把两侧余额都放大 1000 倍再算乘积，并把**有输入的那一侧**再减去 3*amountIn（等价于从输入里抽走 0.3% 给池子）：
+         *   balance0Adjusted = balance0 * 1000 - amount0In * 3
+         *   balance1Adjusted = balance1 * 1000 - amount1In * 3
+         * 若某侧 amountIn==0，则该侧不减（或减 0），表示该侧不是「输入费」来源。
+         * 要求：balance0Adjusted * balance1Adjusted >= _reserve0 * _reserve1 * (1000^2)
+         * 右边是「swap 前旧储备」各乘 1000 后的乘积，与左边同量纲，避免直接比较小数手续费。
+         * 直观理解：若输入给够且 Router 算价正确，扣费后的新乘积 ≥ 旧 k；否则 revert('K')。
+         *
+         * 【执行顺序】能进入本块时，**不是**「amount0In 与 amount1In 都为 0」：
+         *   上一行 `require(amount0In > 0 || amount1In > 0)` 已保证**至少一侧**净流入 > 0；两侧全为 0 会在该行直接 `INSUFFICIENT_INPUT_AMOUNT`，走不到这里。
+         *   典型单向 swap：一侧 amountIn>0（付币侧扣 0.3%），另一侧 amountIn==0（仅输出或仅作乘积另一侧），故 `sub(amount*In.mul(3))` 常只有一侧非零。
+         */
         { // scope for reserve{0,1}Adjusted, avoids stack too deep errors
-        // 手续费 0.3%：输入侧按 amountIn*3/1000 从 balance 中扣除后再比较 K，等价于保留乘积不减
-        // 行级：虚拟扣费——把输入乘 997/1000 后再与另一边的 balance 相乘，与旧 k*1000² 比较
-        uint balance0Adjusted = balance0.mul(1000).sub(amount0In.mul(3));
-        uint balance1Adjusted = balance1.mul(1000).sub(amount1In.mul(3));
-        require(balance0Adjusted.mul(balance1Adjusted) >= uint(_reserve0).mul(_reserve1).mul(1000**2), 'UniswapV2: K');
+        uint balance0Adjusted = balance0.mul(1000).sub(amount0In.mul(3)); // 例：1100*1000 - 100*3 = 1099700
+        uint balance1Adjusted = balance1.mul(1000).sub(amount1In.mul(3)); // 例：1819*1000 - 0 = 1819000
+        require(balance0Adjusted.mul(balance1Adjusted) >= uint(_reserve0).mul(_reserve1).mul(1000**2), 'UniswapV2: K'); // 例：≥ 1000*2000*1000^2
         }
 
-        _update(balance0, balance1, _reserve0, _reserve1);
-        emit Swap(msg.sender, amount0In, amount1In, amount0Out, amount1Out, to);
+        _update(balance0, balance1, _reserve0, _reserve1); // 例：reserve 更新为 balance0=1100、balance1=1819
+        emit Swap(msg.sender, amount0In, amount1In, amount0Out, amount1Out, to); // 例：In=(100,0) Out=(0,181)
     }
 
     /**
