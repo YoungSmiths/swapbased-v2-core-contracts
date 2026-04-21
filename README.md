@@ -2,6 +2,318 @@
 
 本文档面向希望**系统理解本仓库**、并达到**面试可深入讲解**水平的读者。与 `[INTERVIEW_PREP.md](INTERVIEW_PREP.md)` **配套使用**：学习指南负责**体系化知识与章节深度**，面试准备负责**分主题问答与速查**。
 
+### **SwapBased V2 核心工具与代币 (Utility Tokens & Lockers)**
+
+本节涵盖了 `BaseToken` (BASE)、`CoinToken` (COIN)、及其衍生代币 `xBASE`、`oCOIN`，以及通用的 `BaseTokenLocker` 和 `OtcSwap` 业务流程。
+
+#### **1. 业务全生命周期流程图 (PlantUML)**
+
+```plantuml
+@startuml
+title SwapBased V2 衍生代币与锁仓业务流
+
+skinparam ActivityFontSize 12
+skinparam ActivityDiamondFontSize 12
+
+start
+
+:== 阶段 1: 部署与配置 ==;
+:部署 BaseToken 和 CoinToken;
+:部署 xBASE 绑定 BASE 和 oCOIN 绑定 COIN;
+:部署 BaseTokenLocker 和 OtcSwap;
+:Owner 设置 MasterChef 地址;
+:Owner 配置 oCOIN 价格源;
+
+:== 阶段 2: 获取与锁定 ==;
+split
+    :用户调用 xBASE.lock;
+    :销毁 BASE 并铸造 xBASE;
+split again
+    :用户调用 oCOIN.lock;
+    :销毁 COIN 并铸造 oCOIN;
+split again
+    :用户调用 Locker.lock;
+    :支付费用并锁定 LP Token;
+split end
+
+:== 阶段 3: 归属与激励 ==;
+if (选择衍生代币路径?) then (xBASE)
+    :调用 xBASE.vest (30d/100%) 或 xBASE.vestHalf (7d/50%);
+    :xBASE 销毁进入归属期;
+else (oCOIN)
+    :调用 oCOIN.vest (60d) 或 oCOIN.vestBond (150d/1.5x);
+    :oCOIN 销毁进入归属期;
+endif
+
+:== 阶段 4: 退出与领取 ==;
+if (退出方式?) then (到期领取)
+    :等待归属或锁定期结束;
+    split
+        :调用 xBASE.claim;
+        :Chef 铸造奖励给用户;
+    split again
+        :调用 oCOIN.claim;
+        :Chef 铸造奖励给用户;
+    split again
+        :调用 Locker.withdraw;
+        :取回原始 LP Token;
+    split end
+else (即时退出)
+    split
+        :调用 oCOIN.instantExit;
+        :支付 WETH 惩罚后立即领奖;
+    split again
+        :调用 OtcSwap.otcSwap;
+        :以 35% 比例即时换回 BASE;
+    split end
+endif
+
+stop
+@endum
+```
+
+#### **2. 核心合约与函数对照表**
+
+| 业务环节 | 合约 | 核心函数 | 说明 |
+| :--- | :--- | :--- | :--- |
+| **部署配置** | `xBASE` | `setMasterChef`, `transferOperator` | 绑定 Chef 权限与运维地址 |
+| | `oCOIN` | `setV3Pool`, `setV2Pool`, `useLegacyPair` | 配置价格预言机源 |
+| | `OtcSwap` | `supplyBASE`, `changeSwapRate` | 注入兑付储备，调整 OTC 比例 (25-50%) |
+| **资产锁定** | `xBASE` | `lock(uint256 _amount)` | 销毁 BASE 换取 xBASE 记账 |
+| | `oCOIN` | `lock(uint256 _amount)` | 销毁 COIN 换取 oCOIN 记账 |
+| | `Locker` | `lockTokensByBase(token, withdrawer, amount, time)` | 锁 LP，扣除 BASE 固定费与 0.5% LP 费 |
+| **开启归属** | `xBASE` | `vest`, `vestHalf` | 销毁 xBASE 开启 30天(100%) 或 7天(50%) 归属 |
+| | `oCOIN` | `vest`, `vestBond` | 销毁 oCOIN 开启 60天 或 150天(1.5x) 归属 |
+| **收益领取** | `xBASE` | `claim(uint256 id)` | 归属期满后，请求 Chef 铸造奖励 |
+| | `oCOIN` | `claim(uint256 id)` | 归属期满后，请求 Chef 铸造奖励 |
+| **即时退出** | `oCOIN` | `instantExit(amount, maxPay)` | 支付 WETH (TWAP 计价) 后绕过归属期领奖 |
+| | `OtcSwap` | `otcSwap(uint256 amount)` | 将 xBASE 按 35% 比例直接换回 BASE (xBASE 转给 Owner) |
+| **到期取回** | `Locker` | `withdrawTokens(uint256 id)` | 解锁时间后，由指定 `withdrawer` 取回代币 |
+
+#### **3. 关键逻辑解析**
+
+- **oCOIN 的期权定价 (`quotePrice`)**:
+  - `instantExit` 允许用户通过支付 WETH 立即变现。其应付 WETH 数量支持两种模式：
+    - **Legacy**: 使用 V2 Pair 的储备量计算 (`reserve1 * amount / reserve0`)。
+    - **Modern (V3)**: 使用 V3 Pool 的 `observe` 接口获取 TWAP 价格，并结合 `TickMath` 计算。
+- **OtcSwap 的 35% 机制**:
+  - 这是一个“折价即时兑付”通道。用户放弃 65% 的价值以换取瞬间的 BASE 流动性。收取的 xBASE 转入 Owner 地址（通常是国库），起到回购销毁或通缩的作用。
+
+#### **4. OtcSwap 深度业务逻辑图**
+
+```plantuml
+@startuml
+title OtcSwap 业务交互全生命周期
+
+start
+
+:== 阶段 1: 部署与准备 ==;
+:部署 OtcSwap;
+note right: constructor(xBASE, BASE)
+:供应 BASE 储备金;
+note right: supplyBASE(amount)
+
+:== 阶段 2: 质押与兑付 ==;
+:用户获取 xBASE;
+:授权 xBASE 给 OtcSwap;
+:用户执行 otcSwap;
+split
+    :xBASE 转给 Owner;
+split again
+    :BASE 转给用户;
+split end
+:统计 totalXBASE;
+
+:== 阶段 3: 运维管理 ==;
+if (需要参数调整?) then (是)
+    :调整比例;
+    note right: changeSwapRate(newRate)
+else (否)
+    if (库存不足?) then (是)
+        :补充 BASE;
+    else (紧急撤出)
+        :Owner 取回 BASE;
+        note right: retrieveBASE(amount)
+    endif
+endif
+
+stop
+@endum
+```
+
+| 业务阶段 | 涉及角色 | 核心函数 | 逻辑描述 |
+| :--- | :--- | :--- | :--- |
+| **部署初始化** | 部署者 | `constructor` | 初始化 xBASE（支付币）和 BASE（兑换币）地址 |
+| **流动性供应** | Owner | `supplyBASE` | 将 BASE 注入合约，为用户兑付提供库存 |
+| **用户退出** | 用户 | `otcSwap` | **核心业务**: 支付 xBASE (转给 Owner)，按比例 (35%) 领回 BASE |
+| **比例调节** | Owner | `changeSwapRate` | 在 25% 到 50% 之间动态调整兑换效率 |
+| **库存回收** | Owner | `retrieveBASE` | 允许 Owner 撤出合约内剩余的 BASE |
+
+#### **5. xBASE 深度业务逻辑图**
+
+```plantuml
+@startuml
+title xBASE 业务交互全生命周期
+
+start
+
+:== 阶段 1: 部署与配置 ==;
+:部署 xBASE 合约;
+note right: constructor(BASE_token)
+:Owner 设置 MasterChef 地址;
+note right: setMasterChef(address)
+:Operator 角色初始化 (msg.sender);
+
+:== 阶段 2: 资产获取 (Acquisition) ==;
+if (获取方式?) then (BASE 锁定)
+    :用户调用 xBASE.lock;
+    :合约从用户处转入 BASE;
+    :合约销毁 (burn) 接收到的 BASE;
+    :合约为用户 1:1 铸造 (mint) xBASE;
+else (Operator 增发)
+    :Operator 调用 xBASE.mint;
+    :直接为指定地址铸造 xBASE;
+endif
+
+:== 阶段 3: 质押/归属 (Vesting) ==;
+if (归属策略?) then (标准 30 天)
+    :用户调用 xBASE.vest(amount);
+    :记录 30 天归属期, 100% 计量;
+else (快速 7 天)
+    :用户调用 xBASE.vestHalf(amount);
+    :记录 7 天归属期, 50% 计量;
+endif
+:销毁用户持有的 xBASE 余额;
+:创建 userInfo 归属仓位记录;
+
+:== 阶段 4: 领奖与退出 ==;
+:等待 VestPeriod 时间结束;
+:用户调用 xBASE.claim(id);
+:校验 remainTime(id) == 0;
+:调用 MasterChef.mintRewards;
+:Chef 向用户发放最终奖励资产;
+:仓位 totalVested 记账清零;
+
+stop
+@endum
+```
+
+| 业务阶段 | 涉及角色 | 核心函数 | 逻辑描述 |
+| :--- | :--- | :--- | :--- |
+| **部署与运维** | Owner | `setMasterChef`, `transferOperator` | 建立与奖励引擎的信任关系，管理增发权限 |
+| **基础锁定** | 用户 | `lock` | 将底层 BASE 资产 1:1 转换为流通的 xBASE |
+| **开启归属** | 用户 | `vest` / `vestHalf` | 销毁流通 xBASE 换取未来奖励凭证，锁定 30d 或 7d |
+| **同步计量** | MasterChef | `setRewardRate` | Chef 回调更新每秒奖励速率（与收益计算联动） |
+| **最终领奖** | 用户 | `claim` | 归属期满后，触发 Chef 执行实际的铸币发奖动作 |
+
+#### **6. CoinToken (COIN) 业务生命周期图**
+
+`CoinToken` (COIN) 是整个生态系统的核心奖励资产。它本身不包含质押逻辑，但作为被质押/归属合约（如 `MasterChef`、`oCOIN`）铸造并派发的“最终奖励”。
+
+```plantuml
+@startuml
+title CoinToken (COIN) 业务生命周期
+
+start
+
+:== 阶段 1: 部署与权限 ==;
+:部署 CoinToken;
+note right: constructor()
+:部署者自动成为 Operator 和第一个 Minter;
+:Owner 将 Operator 权限转移给治理/多签;
+note right: transferOperator(newOperator_)
+
+:== 阶段 2: 铸造授权 (Minter Management) ==;
+:Operator 为业务合约授权铸造权;
+note right: setMinters(MasterChef/oCOIN, true)
+:MasterChef、oCOIN 等合约获得 mint 权限;
+
+:== 阶段 3: 业务产出 (Minting Flow) ==;
+if (触发场景?) then (MasterChef 产出)
+    :用户在 Farm 质押 LP;
+    :Chef 达到奖励区块;
+    :Chef 调用 **CoinToken.mint**;
+    :COIN 发放至用户钱包;
+else (oCOIN 归属/退出)
+    :用户在 oCOIN 执行 claim 或 instantExit;
+    :oCOIN 调用 **CoinToken.mint**;
+    :COIN 发放至用户钱包;
+endif
+
+:== 阶段 4: 消耗与退出 (Burning Flow) ==;
+if (用户操作?) then (主动销毁)
+    :用户调用 **CoinToken.burn**;
+    :减少 totalSupply;
+else (业务销毁)
+    :用户授权并由 Minter 销毁;
+    :Minter 调用 **CoinToken.burnFrom**;
+    :强制销毁他人账户 COIN (治理场景);
+endif
+
+stop
+@endum
+```
+
+| 业务环节 | 合约角色 | 核心函数 | 说明 |
+| :--- | :--- | :--- | :--- |
+| **部署配置** | `Operator` | `setMinters(address, bool)` | **核心**: 只有进入白名单的合约才能增发 COIN |
+| **奖励产出** | `Minter` | `mint(address, uint256)` | 由 `MasterChef` 等业务端触发，向用户铸造奖励 |
+| **资产销毁** | 用户/Minter | `burn` / `burnFrom` | `burn` 无需权限；`burnFrom` 仅限 Minter (治理保护) |
+| **权限管理** | `Owner` | `transferOperator` | 只有最高权限者可以更换 Operator 运维角色 |
+| **资产救助** | `Operator` | `governanceRecoverUnsupported` | 将误转入合约的其他代币转出 (不包含 COIN) |
+
+#### **7. BaseToken (BASE) 业务生命周期图**
+
+`BaseToken` (BASE) 是整个协议的最基础底层代币。它通常作为初始流动性的源泉，也是 `BaseTokenLocker` 等工具合约支付费用的唯一计价单位。
+
+```plantuml
+@startuml
+title BaseToken (BASE) 业务生命周期
+
+start
+
+:== 阶段 1: 部署与初始化 ==;
+:部署 BaseToken;
+note right: constructor()
+:自动铸造 (mint) 100 万枚 BASE 给部署者;
+:部署者自动成为初始 Operator;
+
+:== 阶段 2: 权限管理 ==;
+:Owner 转移 Operator 权限给治理合约;
+note right: transferOperator(newOperator_)
+:只有新的 Operator 可以调用 mint;
+
+:== 阶段 3: 业务应用与产出 ==;
+if (应用场景?) then (核心运维)
+    :Operator 调用 **BaseToken.mint**;
+    :增发 BASE 给特定业务端;
+else (作为费用支付)
+    :用户在 Locker 锁仓 LP;
+    :支付 BASE 作为 lockFee;
+    :BASE 转移至协议营销地址;
+endif
+
+:== 阶段 4: 消耗与销毁 ==;
+if (销毁发起者?) then (持有者自毁)
+    :用户调用 **BaseToken.burn**;
+    :减少用户余额与 totalSupply;
+else (Operator 强制销毁)
+    :用户授权给合约;
+    :Operator 调用 **BaseToken.burnFrom**;
+    :强制销毁指定账户的 BASE;
+endif
+
+stop
+@endum
+```
+
+| 业务环节 | 合约角色 | 核心函数 | 说明 |
+| :--- | :--- | :--- | :--- |
+| **初始发行** | 部署者 | `constructor` | **差异**: BASE 在部署时即产生 100 万枚初始供给 |
+| **增发维护** | `Operator` | `mint(address, uint256)` | **核心**: 仅单一 Operator 可增发（与 COIN 的多 minter 不同） |
+| **资产销毁** | 用户/Operator | `burn` / `burnFrom` | `burnFrom` 被限制为仅 Operator 可用，具有极高控制权 |
+| **资产救回** | `Operator` | `governanceRecoverUnsupported` | 用于救回转错到 BASE 合约的其他 ERC20 资产 |
+
 ---
 
 ## 0. 文档说明、阅读路线与章节索引
