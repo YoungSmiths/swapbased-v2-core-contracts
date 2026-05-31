@@ -90,7 +90,17 @@ interface ISingleStaking {
 /**
  * @title MasterChefCoin
  * @notice 与 MasterchefV2 同族的 **流动性挖矿调度中心**：仅已注册的 Farm（`StakingRewards`）可调用 `mintRewards`，按池 `ratios`（万分比）向多种 `IBaseToken` 铸币。
- * @dev 在 V2 基础上增加 **`minters` 与 `mintRewardsByAddress`**：白名单可不经过 Farm 的 `ratios` 拆分，直接对指定代币 `mint`；构造函数将 `minters[部署者]=true`。
+ * @dev 相对 `MasterchefV2` 的增量：**`minters` + `mintRewardsByAddress` + `setMinters`**（其余：Farm 注册、双轨排放、xBASE 投票等与 V2 同族）。
+ *
+ * **两条铸币路径（勿混用场景）**：
+ * - **常规挖矿**：用户押 LP → Farm `getReward` → `mintRewards`（必须 `isFarm`，按池 `ratios` 拆 COIN/BASE 等）。
+ * - **白名单直铸**：`minters` 内地址 → `mintRewardsByAddress`（不经 Farm、不按 `ratios`，指定单币全额铸给接收人）。
+ *
+ * **白名单典型场景**：运营空投/补偿、合作方一次性结算、活动合约发奖（奖励不在 StakingRewards 的 `earned` 里记账）、
+ * 仅发一种币（如 100% COIN，不想改池子 `setTokensAndRatiosFarm`）、部署后冷启动测试。
+ * **不适用**：正常 LP 农场领取——应走 `mintRewards`。
+ *
+ * **安全**：须同时满足 `MasterChefCoin.minters[调用方]` 与 `CoinToken.minters[本 Chef 地址]`；活动结束应 `setMinters(活动, false)`。
  */
 contract MasterChefCoin is Ownable {
     using SafeMath for uint256;
@@ -143,10 +153,14 @@ contract MasterChefCoin is Ownable {
     mapping(address => uint) public poolPidByStakingFarmAddress;
     mapping(address => bool) public voted;
 
-    /// @notice 可调用 `mintRewardsByAddress` 的白名单地址；部署者为初始 minter
+    /**
+     * @notice 可调用 `mintRewardsByAddress` 的白名单（与 `isFarm` 无关）。
+     * @dev 典型登记对象：活动/空投合约、运维多签执行器、合作方结算脚本。
+     *      构造函数将 `minters[部署者]=true`，便于上线前联调；生产环境宜最小权限，用完即 `setMinters(addr, false)`。
+     */
     mapping(address => bool) public minters;
 
-    /// @notice 仅允许 `minters[msg.sender] == true`
+    /// @notice 仅 `minters` 白名单可调用（用于 `mintRewardsByAddress`，与 `isFarm` 无关）
     modifier onlyRewardsMinter() {
         require(minters[msg.sender] == true, "Only minters allowed");
         _;
@@ -157,7 +171,7 @@ contract MasterChefCoin is Ownable {
      * @param _xBASE 治理代币 xBASE 合约地址
      * @param _rewards 默认奖励代币列表（须实现 IBaseToken.mint）
      * @param _ratios 与 _rewards 等长的万分比数组，总和通常约定为 10000
-     * @param _stakingRewardsGenesis 到达该时间戳后才允许 `mintRewards` / `mintRewardsByAddress`（须 ≥ block.timestamp）
+     * @param _stakingRewardsGenesis 到达该时间戳后才允许 `mintRewards`（须 ≥ block.timestamp）；`mintRewardsByAddress` 当前实现不校验此字段
      */
     constructor(
         address _xBASE,
@@ -172,6 +186,7 @@ contract MasterChefCoin is Ownable {
         defaultRatios = _ratios;
         stakingRewardsGenesis = _stakingRewardsGenesis;
         lastUpdatedTimeVotes = block.timestamp;
+        // 部署者作为首个 minter：冷启动、测试网发奖或首批空投脚本（非 Farm 路径）
         minters[msg.sender] = true;
     }
 
@@ -265,6 +280,8 @@ contract MasterChefCoin is Ownable {
 
     /**
      * @notice Farm 在用户领取奖励时调用：按本池 `rewards`/`ratios` 将 `_amount` 拆成多笔 `mint`（万分比）。
+     * @dev **常规挖矿主路径**（相对 `mintRewardsByAddress`）：仅已登记 Farm；奖励与质押份额、池权重一致。
+     *      例：池配置 ratios=[8000,2000]，用户 earned=100 → 铸 80 COIN + 20 BASE。
      * @param _receiver 奖励接收地址（通常为领励用户）
      * @param _amount StakingRewards 中累计的「奖励计量」总量（与 `getReward` 中 `reward` 一致）
      */
@@ -286,9 +303,24 @@ contract MasterChefCoin is Ownable {
 
     /**
      * @notice 白名单入口：不经过 Farm `ratios` 拆分，直接向指定 `IBaseToken` 铸 `_amount` 给 `_receiver`。
-     * @param _receiver 接收铸造代币的地址
-     * @param _amount 铸造数量
-     * @param _token 奖励代币合约地址（须实现 IBaseToken）
+     * @dev **使用场景（相对 MasterchefV2 的增量能力）**：
+     *      1. **运营空投/用户补偿**：一次性给用户铸指定数量 COIN 或 BASE，无需部署 Farm、不改池 ratios。
+     *      2. **活动/任务合约发奖**：奖励由链下或独立合约结算，不在 `StakingRewards.earned` 累计；将活动合约加入 `minters` 后由其调用本函数。
+     *      3. **合作方结算**：按协议只发单一代币（例：100% COIN），避免走多币 Farm 的 80/20 拆分。
+     *      4. **冷启动/测试**：部署者已在构造函数中成为 minter，可在主网 Farm 开放前做铸币联调（须 `_token.mint` 侧也把本 Chef 列入 minters）。
+     *
+     * **不适用**：LP 质押挖矿的正常 `getReward`——应走 `mintRewards`，否则与池内权重、审计模型不一致。
+     *
+     * **权限与依赖**：
+     *      - 调用方须在 `minters` 白名单（`onlyRewardsMinter`）。
+     *      - 本合约地址须为目标代币（如 `CoinToken`）的 `minters`，否则 `IBaseToken.mint` revert。
+     *      - 与 `mintRewards` 不同：不校验 `isFarm`、不按 `poolInfo[pid].ratios` 拆分；当前实现亦**不**校验 `stakingRewardsGenesis`（仅 `mintRewards` 校验开闸时间）。
+     *
+     * **运维**：活动结束调用 `setMinters(活动合约, false)`，防止遗留铸币权。
+     *
+     * @param _receiver 接收铸造代币的地址（用户钱包或活动金库）
+     * @param _amount 铸造数量（代币最小单位，全额、无万分比拆分）
+     * @param _token 奖励代币合约地址（须实现 `IBaseToken.mint`，且已将本 MasterChefCoin 列入该币的 minters）
      */
     function mintRewardsByAddress(address _receiver, uint256 _amount, address _token) public onlyRewardsMinter {
         require(
@@ -561,6 +593,15 @@ contract MasterChefCoin is Ownable {
         globalCommunitySkullPerSecond = _globalCommunitySkullPerSecond;
     }
 
+    /**
+     * @notice 维护 `mintRewardsByAddress` 白名单（仅 owner）。
+     * @dev **使用场景**：
+     *      - 新活动上线：`setMinters(活动合约, true)`，并将本 Chef 地址加入 `CoinToken.setMinters(Chef, true)`。
+     *      - 活动/合作结束：`setMinters(活动合约, false)`，收回直铸权。
+     *      - 退役有漏洞或废弃的脚本地址：置 false，与 `killFarm` 下架 Farm 配合做风控。
+     * @param _minter 待授权或撤销的地址（活动合约、多签、运维脚本等，非 LP Farm 地址）
+     * @param _canMint true=允许调用 `mintRewardsByAddress`；false=撤销
+     */
     function setMinters(address _minter, bool _canMint) public onlyOwner {
         minters[_minter] = _canMint;
     }

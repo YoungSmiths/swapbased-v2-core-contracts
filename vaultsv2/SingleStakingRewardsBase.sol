@@ -499,7 +499,7 @@ contract SingleStakingRewardsBase is IStakingRewards, ReentrancyGuard {
     /// @notice 从**已领取奖励**中再给 `taxWallet` 铸的比例（bps）。默认 200 → 2%。
     uint256 public ownerFee = 200; // 2%
     /// @notice 质押时从 `amount` 中划给 `taxWallet` 的比例（bps）。默认 500 → 5%（若产品文档写 1% 请核对部署参数）。
-    uint256 public depositFee = 500; // 1%
+    uint256 public depositFee = 500; // 5%
     /// @notice 开启 `burnFeeEnabled` 后，从质押额中销毁的比例（bps）。
     uint256 public burnFee = 0; // 0%
     /// @notice 是否启用销毁费（需质押 token 支持 `IERC20Burnable.burn`）。

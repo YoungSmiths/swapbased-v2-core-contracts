@@ -677,13 +677,13 @@ contract StakingRewards is IStakingRewards, ReentrancyGuard {
     /// @notice 先刷新全局积分再结算 account 的待领取快照（须在 stake/withdraw/getReward 等入口执行）
     modifier updateReward(address account) {
         rewardPerTokenStored = rewardPerToken();
-        lastUpdateTime = block.timestamp;
+        lastUpdateTime = block.timestamp; // 更新时间戳, 所以earned里再次调用rewardPerToken()时, 不会重新计算rewardPerToken()
         if (account != address(0)) {
-            rewards[account] = earned(account);
-            userRewardPerTokenPaid[account] = rewardPerTokenStored;
+            rewards[account] = earned(account); // 计算用户待领取奖励
+            userRewardPerTokenPaid[account] = rewardPerTokenStored; // 更新用户已结算积分
         }
         _;
-    }
+    } // 更新用户待领取奖励
 
     /* ========== EVENTS ========== */
 

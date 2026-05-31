@@ -2,21 +2,18 @@
 pragma solidity ^0.5.16;
 
 /**
- * @dev Contract module which provides a basic access control mechanism, where
- * there is an account (an owner) that can be granted exclusive access to
- * specific functions.
- *
- * This module is used through inheritance. It will make available the modifier
- * `onlyOwner`, which can be aplied to your functions to restrict their use to
- * the owner.
+ * @dev 基础访问控制：存在一个 owner，可对特定函数享有独占权限。
+ *      通过继承使用，提供 `onlyOwner` 修饰符，将函数限制为仅 owner 可调用。
  */
 contract Ownable {
+    /// @notice 当前合约 owner 地址
     address private _owner;
 
+    /// @notice owner 变更事件
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
 
     /**
-     * @dev Initializes the contract setting the deployer as the initial owner.
+     * @dev 初始化：将部署者设为初始 owner。
      */
     constructor () internal {
         _owner = msg.sender;
@@ -24,14 +21,14 @@ contract Ownable {
     }
 
     /**
-     * @dev Returns the address of the current owner.
+     * @notice 返回当前 owner 地址。
      */
     function owner() public view returns (address) {
         return _owner;
     }
 
     /**
-     * @dev Throws if called by any account other than the owner.
+     * @dev 若非 owner 调用则 revert。
      */
     modifier onlyOwner() {
         require(isOwner(), "Ownable: caller is not the owner");
@@ -39,18 +36,15 @@ contract Ownable {
     }
 
     /**
-     * @dev Returns true if the caller is the current owner.
+     * @notice 若调用者为当前 owner 则返回 true。
      */
     function isOwner() public view returns (bool) {
         return msg.sender == _owner;
     }
 
     /**
-     * @dev Leaves the contract without owner. It will not be possible to call
-     * `onlyOwner` functions anymore. Can only be called by the current owner.
-     *
-     * > Note: Renouncing ownership will leave the contract without an owner,
-     * thereby removing any functionality that is only available to the owner.
+     * @notice 放弃 ownership；之后无法再调用 `onlyOwner` 函数。
+     * @dev 仅当前 owner 可调用。放弃后合约无 owner，仅 owner 可用的功能将永久不可用。
      */
     function renounceOwnership() public onlyOwner {
         emit OwnershipTransferred(_owner, address(0));
@@ -58,15 +52,17 @@ contract Ownable {
     }
 
     /**
-     * @dev Transfers ownership of the contract to a new account (`newOwner`).
-     * Can only be called by the current owner.
+     * @notice 将合约所有权转移给新账户。
+     * @dev 仅当前 owner 可调用。
+     * @param newOwner 新 owner 地址，不可为零地址。
      */
     function transferOwnership(address newOwner) public onlyOwner {
         _transferOwnership(newOwner);
     }
 
     /**
-     * @dev Transfers ownership of the contract to a new account (`newOwner`).
+     * @dev 内部转移 ownership 并发出事件。
+     * @param newOwner 新 owner 地址。
      */
     function _transferOwnership(address newOwner) internal {
         require(newOwner != address(0), "Ownable: new owner is the zero address");
@@ -98,10 +94,9 @@ interface IBaseToken {
  * @example 协议允许“把 xBASE 存到某个单币池也算投票权”，则该池的 stakingFarm 合约需要实现 balanceOf(user)。
  */
 interface ISingleStaking {
+    /// @notice 查询用户在单币质押合约中的余额（用于计票）。
     function balanceOf(address account) external view returns (uint256);
 }
-
-/* MADE BY KELL */
 
 /**
  * @title MasterchefV2
@@ -111,7 +106,7 @@ interface ISingleStaking {
  */
 contract MasterchefV2 is Ownable {
     using SafeMath for uint256;
-    // immutables
+
     /// @notice 治理/锁仓凭证代币地址：用于计算投票权（钱包余额 + 可选的单币质押余额）。
     /// @example 用户把 BASE 锁成 xBASE 后，xBASE 余额越高，能为喜欢的矿池投的“社区加成票”越多。
     address public xBASE;
@@ -135,14 +130,16 @@ contract MasterchefV2 is Ownable {
     uint public globalSkullPerSecond;
     /// @notice 全局每秒向所有「社区投票」池子分配的总计量（再按 `allocPointCommunity` 分摊）。
     uint public globalCommunitySkullPerSecond;
+    /// @notice 新注册池默认奖励拆分万分比（与 defaultRewards 等长）；`deploy` / `deployWithCreation` 时拷贝进 poolInfo。
     uint256[] public defaultRatios;
+    /// @notice 新注册池默认奖励代币地址列表；须实现 `IBaseToken.mint`。
     address[] public defaultRewards;
 
     /// @notice 用户投票状态：记录用户当前投票数量与投给哪个池（votedID）。
     /// @example 小明把 1000 票投给 pid=3，则 userInfo[小明].vote=1000 且 votedID=3；后续余额变化会在 `updateVotePool` 时同步。
     mapping(address => UserInfo) public userInfo;
 
-    // Info of each user.
+    /// @notice 每个用户的投票状态。
     struct UserInfo {
         /// @notice 用户当前“投出去”的票数（按 xBASE 计量，可能包含单币质押余额）。
         uint256 vote;
@@ -150,7 +147,7 @@ contract MasterchefV2 is Ownable {
         uint256 votedID;
     }
 
-    // Info of each pool.
+    /// @notice 每个矿池（Farm）的调度与奖励配置。
     struct PoolInfo {
         /// @notice 该池对应的 StakingRewards（Farm）合约地址（用户 stake/withdraw/getReward 的入口）。
         address stakingFarm;
@@ -174,17 +171,20 @@ contract MasterchefV2 is Ownable {
         address[] rewards;
     }
     
-    // Info of each pool.
+    /// @notice 已注册矿池列表；下标即为 `pid`。
     PoolInfo[] public poolInfo;
 
-    // info about rewards for a particular staking token
+    /// @notice 按 Farm 地址登记的矿池元数据（与 poolInfo 通过 pid 关联）。
     struct StakingRewardsInfo {
+        /// @notice StakingRewards 合约地址（与 mapping 的 key 通常相同）。
         address stakingRewards;
     }
 
-    // rewards info by staking token
+    /// @notice Farm 合约地址 → 登记信息；`mintRewards` 时由 `msg.sender` 反查配置。
     mapping(address => StakingRewardsInfo) public stakingRewardsInfoByStakingFarmAddress;
+    /// @notice Farm 合约地址 → `poolInfo` 数组下标（pid）。
     mapping(address => uint) public poolPidByStakingFarmAddress;
+    /// @notice 用户是否已调用过 `votePool` 且尚未 `unVotePool`。
     mapping(address => bool) public voted;
 
     /**
@@ -209,7 +209,8 @@ contract MasterchefV2 is Ownable {
         lastUpdatedTimeVotes = block.timestamp;
     }
 
-    // permissioned functions
+    // ========== 需 owner 权限：部署与注册 Farm ==========
+
     /**
      * @notice **使用场景**：一次性把多个已部署的 `StakingRewards` 矿池注册进 MasterchefV2（常用于迁移或批量上线）。
      * @dev **谁来调用**：仅 `owner`（通常是项目多签、Timelock 执行器或运维发布脚本）可调用。
@@ -240,8 +241,13 @@ contract MasterchefV2 is Ownable {
         _deploy(_farmAddress, _farmStartTime, _masterchefControlled);
     }
 
-    /// @dev 登记 `isFarm`、追加 `poolInfo`、默认 `ratios/rewards` 来自构造函数（defaultRewards/defaultRatios）。
-    ///      这是“只登记不创建”的路径：Farm 合约由外部先部署好，MasterchefV2 只负责调度与铸币。
+    /**
+     * @dev 登记 `isFarm`、追加 `poolInfo`；Farm 须外部先部署，本合约只调度与铸币。
+     *      默认 `ratios/rewards` 来自构造函数；新池 alloc 初值为 0，需 Owner 再 `set` 并 `massUpdatePools`。
+     * @param _farmAddress 已部署的 StakingRewards 地址。
+     * @param _farmStartTime 须大于 `stakingRewardsGenesis`（本函数内仅校验，不写入 StakingRewards）。
+     * @param _masterchefControlled 是否由 Chef 自动控速；为 true 时默认可投票。
+     */
     function _deploy(address _farmAddress, uint256 _farmStartTime, bool _masterchefControlled) internal {
         StakingRewardsInfo storage info = stakingRewardsInfoByStakingFarmAddress[_farmAddress];
         require(info.stakingRewards == address(0), 'MasterChef: already deployed');
@@ -263,18 +269,12 @@ contract MasterchefV2 is Ownable {
         poolPidByStakingFarmAddress[_farmAddress] = poolInfo.length - 1;
     }
 
-    // deploy a staking reward contract for the staking token, and store the reward amount
-    // the reward will be distributed to the staking reward contract no sooner than the genesis
     /**
-     * @notice 内联创建新的 `StakingRewards` 并注册为 Farm。
-     * @param _stakingToken 用户质押代币（多为 LP）
-     * @param _farmStartTime Farm 起始时间，须大于 `stakingRewardsGenesis`
-     */
-    /**
-     * @notice **使用场景**：Owner 希望“一步到位”创建并登记一个新矿池：这里会 `new StakingRewards(...)` 并把它注册到本 MasterchefV2。
+     * @notice **使用场景**：Owner 一步创建并登记新矿池：内联 `new StakingRewards(...)` 并写入 `poolInfo`。
      * @param _stakingToken 用户质押的 ERC20（常见为 LP Token 地址）。
      * @param _farmStartTime 单池开采开始时间戳（必须 > stakingRewardsGenesis）。
-     * @dev 与 StakingRewardsFactory 的区别：这里的“key”是 **新 Farm 合约地址**，而不是 LP 地址。
+     * @dev 与 StakingRewardsFactory 的区别：索引 key 是 **Farm 合约地址**，不是 LP 地址。
+     *      奖励不早于 genesis 发放；新池初始 alloc 为 0，需 Owner 再 `set` 权重并 `massUpdatePools`。
      */
     function deployWithCreation(address _stakingToken, uint256 _farmStartTime) public onlyOwner {
         address newFarm = address(new StakingRewards(address(this), owner(), _stakingToken, 0, _farmStartTime));
@@ -296,28 +296,38 @@ contract MasterchefV2 is Ownable {
         poolPidByStakingFarmAddress[newFarm] = poolInfo.length - 1;
     }
 
+    /**
+     * @notice 查询某 pid 的奖励拆分万分比。
+     * @param poolIndex `poolInfo` 下标（pid）。
+     */
     function getRatiosForFarm(uint256 poolIndex) public view returns (uint256[] memory) {
         require(poolIndex < poolInfo.length, "Invalid pool index");
         return poolInfo[poolIndex].ratios;
     }
 
+    /**
+     * @notice 查询某 pid 的奖励代币地址列表。
+     * @param poolIndex `poolInfo` 下标（pid）。
+     */
     function getRewardsForFarm(uint256 poolIndex) public view returns (address[] memory) {
         require(poolIndex < poolInfo.length, "Invalid pool index");
         return poolInfo[poolIndex].rewards;
     }
 
-    ///// permissionless functions
+    // ========== 无权限限制：Farm 回调铸币 ==========
 
     /**
      * @notice Farm 在用户领取时调用：按本池 rewards/ratios 将 _amount 拆成多笔 mint。
      * @dev 仅 isFarm[msg.sender]；先 updateVotePool 同步投票权变化；_amount 为 StakingRewards 中记账的「奖励计量」。
+     * @param _receiver 最终收奖励的用户地址。
+     * @param _amount StakingRewards 侧结算的奖励计量（再按 ratios 拆成多币种 mint）。
      */
     function mintRewards(address _receiver, uint256 _amount) public {
         // 核心安全线：只有登记过的 StakingRewards 才能触发铸币，避免任意合约无限 mint。
         require(isFarm[msg.sender] == true, "MasterChef: only farms can mint rewards");
         // 全局开闸前禁止发奖：即便某个池“内部算出了 rewards”，也会卡在这里回滚。
         require(block.timestamp >= stakingRewardsGenesis, 'Masterchef: rewards too soon');
-
+ 
         // 在铸币前先把投票状态同步一遍：如果用户的 xBASE 余额变化了，这里会调整其投票票数，从而影响 allocPointCommunity。
         updateVotePool(_receiver);
         // msg.sender 是矿池合约，receiver 是最终领币的用户；用矿池地址找到对应 pid。
@@ -333,13 +343,19 @@ contract MasterchefV2 is Ownable {
         }
     }
 
+    /**
+     * @notice 提取误转入本合约的 ERC20（仅 owner）。
+     * @param token 代币合约地址。
+     * @param amount 转出数量。
+     */
     function pullExtraTokens(address token, uint256 amount) external onlyOwner {
         IERC20(token).transfer(msg.sender, amount);
     }
 
-
-    // Update reward variables for all pools. Be careful of gas spending!
-    // 使用场景：改了全局排放或很多池子的权重后，想让所有池 rewardRate 立刻对齐。
+    /**
+     * @dev 遍历所有池并调用 `_updatePool`；池多时注意 Gas。
+     * @notice 使用场景：调整全局排放或权重后，一次性同步各池 `rewardRate`。
+     */
     function _massUpdatePools() internal {
         uint256 length = poolInfo.length;
         for (uint256 pid = 0; pid < length; ++pid) {
@@ -347,11 +363,17 @@ contract MasterchefV2 is Ownable {
         }
     }
 
+    /**
+     * @notice 对外暴露的全量刷新各池 `rewardRate`（仅 owner）。
+     */
     function massUpdatePools() public onlyOwner {
         _massUpdatePools();
     }
 
-    /// @notice **使用场景**：只更新单个池的 rewardRate（例如运营只调了某一个池的 allocPoint）。
+    /**
+     * @notice 只更新单个池的 `rewardRate`（例如仅调整了某一池的 allocPoint）。
+     * @param _pid `poolInfo` 下标。
+     */
     function updatePool(uint256 _pid) public onlyOwner {
         _updatePool(_pid);
     }
@@ -359,6 +381,7 @@ contract MasterchefV2 is Ownable {
     /**
      * @notice 根据全局参数计算本池 StakingRewards 应有的每秒产出，并 setRewardRate。
      * @dev 可投票池：基础份额 + 社区份额；若 Farm 已被 kill（isFarm 为 false）则清零 alloc 与 rewardRate。
+     * @param _pid `poolInfo` 下标。
      */
     function _updatePool(uint256 _pid) internal {
         PoolInfo storage pool = poolInfo[_pid];
@@ -384,19 +407,24 @@ contract MasterchefV2 is Ownable {
                 if (pool.allocPoint != 0) {
                     totalAllocPoint = totalAllocPoint.sub(pool.allocPoint);
                     pool.allocPoint = 0;
-                    // set reward rates
+                    // 下架池：将链上 rewardRate 置 0
                     IStakingRewards(info.stakingRewards).setRewardRate(0);
                 }
                 if (pool.allocPointCommunity != 0) {
                     totalAllocPointCommunity = totalAllocPointCommunity.sub(pool.allocPointCommunity);
                     pool.allocPointCommunity = 0;
-                    // set reward rates
+                    // 下架池：将链上 rewardRate 置 0
                     IStakingRewards(info.stakingRewards).setRewardRate(0);
                 }
             }
         }
     }
 
+    /**
+     * @dev 更新单池基础权重并维护 `totalAllocPoint`；改后需 `updatePool` / `massUpdatePools` 才会写入 Farm。
+     * @param _pid 池索引。
+     * @param _allocPoint 新的基础 alloc 权重。
+     */
     function _set(uint256 _pid, uint256 _allocPoint) internal {
         PoolInfo storage pool = poolInfo[_pid];
         if (totalAllocPoint != 0) {
@@ -408,10 +436,20 @@ contract MasterchefV2 is Ownable {
         }
     }
 
+    /**
+     * @notice 设置某池基础分配权重（仅 owner）。
+     * @param _pid 池索引。
+     * @param _allocPoint 基础 alloc 权重。
+     */
     function set(uint256 _pid, uint256 _allocPoint) external onlyOwner {
         _set(_pid, _allocPoint);
     }
 
+    /**
+     * @notice 批量设置多池基础 alloc（仅 owner）。
+     * @param _pids 池索引数组。
+     * @param _allocs 与 _pids 等长的权重数组。
+     */
     function setBulk(uint256[] memory _pids, uint256[] memory _allocs) public onlyOwner {
         uint256 length = _pids.length;
         for (uint256 pid = 0; pid < length; ++pid) {
@@ -419,12 +457,17 @@ contract MasterchefV2 is Ownable {
         }
     }
 
-    /* VOTING */
-    // 用户用 xBASE 投票权为某池「拉」社区每秒份额：
-    // - globalCommunitySkullPerSecond 是社区加成“总盘子”
-    // - allocPointCommunity 是每个池从社区盘子里分走的份额
-    // 为了避免投票变化后某些池 rewardRate 长期不刷新，这里以“至少每 7 天一次”触发全量 update。
+    // ========== 投票：xBASE 决定社区排放 allocPointCommunity ==========
+    // 用户用 xBASE 为某池「拉」社区每秒份额：
+    // - globalCommunitySkullPerSecond 是社区加成总盘子
+    // - allocPointCommunity 是各池从社区盘子分走的份额
+    // 至少每 7 天投票变动会触发一次 _massUpdatePools，避免 rewardRate 长期不刷新。
 
+    /**
+     * @dev 增加某池社区权重及全局 `totalAllocPointCommunity`。
+     * @param _pid 池索引。
+     * @param _allocPointCommunity 本次增加的社区票数/权重。
+     */
     function increaseAllocation(uint256 _pid, uint256 _allocPointCommunity) internal {
         if (block.timestamp >= lastUpdatedTimeVotes  + 7 days) {
             _massUpdatePools();
@@ -435,6 +478,11 @@ contract MasterchefV2 is Ownable {
         poolInfo[_pid].allocPointCommunity = poolInfo[_pid].allocPointCommunity.add(_allocPointCommunity);
     }
 
+    /**
+     * @dev 减少某池社区权重及全局 `totalAllocPointCommunity`。
+     * @param _pid 池索引。
+     * @param _allocPointCommunity 本次减少的社区票数/权重。
+     */
     function decreaseAllocation(uint256 _pid, uint256 _allocPointCommunity) internal {
         if (block.timestamp >= lastUpdatedTimeVotes  + 7 days) {
             _massUpdatePools();
@@ -457,6 +505,9 @@ contract MasterchefV2 is Ownable {
      * @example 场景2（减票）：
      *          小明原先 1000 票，后来只剩 700，
      *          本函数会把 decreaseAmount=300 从该池 community 权重里扣掉。
+     * @param _user 投票用户。
+     * @param _amount 目标票数（与当前 user.vote 的差额会增减 allocPointCommunity）。
+     * @param _pid 被投票的池索引。
      */
     function vote(address _user, uint256 _amount, uint256 _pid) internal {
         UserInfo storage user = userInfo[_user];
@@ -477,6 +528,8 @@ contract MasterchefV2 is Ownable {
      * @notice 撤销用户在某池的全部投票（把该用户贡献给池子的 community 权重一次性减回去）。
      * @dev 业务场景：用户点击 `unVotePool`，或治理希望用户重新投其它池时，会先做这一步。
      * @example 小明在 3 号池投了 1500 票，调用后 3 号池 `allocPointCommunity` 会减少 1500，小明的 `user.vote` 归零。
+     * @param _user 撤票用户。
+     * @param _pid 当前投票所在的池索引。
      */
     function redeemVote(address _user, uint256 _pid) internal {
         UserInfo storage user = userInfo[_user];
@@ -484,8 +537,6 @@ contract MasterchefV2 is Ownable {
         user.vote = 0;
         
     }
-
-    // -----------------------------
 
     /**
      * @notice 计算用户当前总投票权：`xBASE 钱包余额 + 被标记为计票池中的存款余额`。
@@ -497,9 +548,9 @@ contract MasterchefV2 is Ownable {
      *          则 `getTotalVotePower(小明)=1000`。
      */
     function getTotalVotePower(address _user) public view returns(uint256){
-        // get xBASE wallet balance
+        // 钱包持有的 xBASE
         uint256 xBaseUserWalletBalance = IERC20(xBASE).balanceOf(_user);
-        // get xBASE staked on SingleStake vaults
+        // 在开启计票开关的单币池中质押的 xBASE
         uint256 length = poolInfo.length;
         uint256 totalUserDeposits;
         for (uint256 pid = 0; pid < length; ++pid) {
@@ -553,6 +604,9 @@ contract MasterchefV2 is Ownable {
      * @example 小明曾投票 1000，后来把 xBASE 全卖掉：
      *          下次触发 `mintRewards` 时这里会发现投票权为 0，并把 `voted[小明]` 置 false。
      */
+    /**
+     * @param _user 待同步投票状态的用户（常为领奖人 `_receiver`）。
+     */
     function updateVotePool(address _user) internal {
         if (voted[_user]){
             UserInfo storage user = userInfo[_user];
@@ -565,24 +619,36 @@ contract MasterchefV2 is Ownable {
         }
     }
 
-    /*********************** FARMS CONTROLS ***********************/
+    // ========== 农场运维：奖励结构、上下架、投票与全局排放 ==========
 
+    /**
+     * @notice 设置某池的奖励代币列表与万分比拆分（仅 owner）。
+     * @dev 使用场景：某池从只发 COIN 升级为 COIN+BASE，或调整活动期比例。
+     *      `_ratios` 须与 `_rewards` 等长，总和通常约定为 10000。
+     * @param _pid 池索引。
+     * @param _rewards 奖励代币地址数组。
+     * @param _ratios 万分比数组。
+     */
     function setTokensAndRatiosFarm(uint _pid, address[] calldata _rewards, uint[] calldata _ratios) external onlyOwner {
-        // 使用场景：某池从「只发 COIN」升级为「发 COIN + BASE」，或调整分成比例（例如活动期 90/10，常态 80/20）。
-        // 注意：_ratios 为万分比数组，必须与 _rewards 一一对应；否则 mintRewards 的 for 循环会按当前 rewards.length 拆分。
         PoolInfo storage pool = poolInfo[_pid];
         pool.ratios = _ratios;
         pool.rewards = _rewards;
     }
 
+    /**
+     * @notice 设置此后新 `deploy` / `deployWithCreation` 池子的默认奖励结构（仅 owner）。
+     * @dev 不会自动回写已存在池；已存在池请用 `setTokensAndRatiosFarm`。
+     */
     function setDefaultTokensAndRatios(address[] calldata _rewards, uint[] calldata _ratios) external onlyOwner {
-        // 使用场景：之后新注册/新创建的池子默认采用新的奖励结构（不会自动回写已存在池）。
         defaultRatios = _ratios;
         defaultRewards = _rewards;
     }
 
+    /**
+     * @notice 紧急下架矿池：禁止 `mintRewards`，关闭投票并刷新各池速率。
+     * @param _farm StakingRewards 合约地址。
+     */
     function killFarm(address _farm) external onlyOwner {
-        // 使用场景：紧急下架某矿池（风险/迁移/结束活动）：停止该 farm 调用 mintRewards，并撤掉其投票入口。
         require(isFarm[_farm] == true, "MasterChef: This is not active");
 
         isFarm[_farm] = false;
@@ -593,8 +659,11 @@ contract MasterchefV2 is Ownable {
         _massUpdatePools();
     }
 
+    /**
+     * @notice 重新启用曾被 `killFarm` 的矿池（不重新 deploy，Farm 地址不变）。
+     * @param _farm StakingRewards 合约地址。
+     */
     function activateFarm(address _farm) external onlyOwner {
-        // 使用场景：被 kill 的矿池修复后重新上线（不重新 deploy，不改 stakingFarm 地址）。
         StakingRewardsInfo storage info = stakingRewardsInfoByStakingFarmAddress[_farm];
         require(info.stakingRewards != address(0), 'MasterChef: needs to be a dead farm');
         require(isFarm[_farm] == false, "MasterChef: This is not active");
@@ -604,11 +673,18 @@ contract MasterchefV2 is Ownable {
         _massUpdatePools();
     }
 
+    /**
+     * @notice 开关某池是否允许用户 `votePool`（仅 owner）。
+     * @param _pid 池索引。
+     * @param _isVoteable true 表示可投票。
+     */
     function setIsVoteable(uint256 _pid, bool _isVoteable) external onlyOwner {
-        // 使用场景：临时关闭某池的投票入口（例如投票被刷、或该池不希望再吃社区加成）。
         _setIsVoteable(_pid, _isVoteable);
     }
 
+    /**
+     * @dev 关闭投票时会将该池已积累的 `allocPointCommunity` 一次性扣回。
+     */
     function _setIsVoteable(uint256 _pid, bool _isVoteable) internal {
         PoolInfo storage pool = poolInfo[_pid];
         pool.isVoteable = _isVoteable;
@@ -619,58 +695,81 @@ contract MasterchefV2 is Ownable {
         }
     }
 
+    /**
+     * @notice 批量开关多池投票资格（仅 owner）。
+     */
     function setIsVoteableBulk(uint256[] memory _pids, bool[] memory _voteable) public onlyOwner {
-        // 使用场景：一次性批量开关多个池的投票资格（治理提案执行/迁移期）。
         uint256 length = _pids.length;
         for (uint256 pid = 0; pid < length; ++pid) {
             _setIsVoteable(_pids[pid], _voteable[pid]);
         }
     }
 
+    /**
+     * @dev 设置某池是否由本合约通过 `_updatePool` 自动写 `rewardRate`。
+     */
     function _setIsMasterchefControlled(uint256 _pid, bool _masterchefControlled) internal {
         PoolInfo storage pool = poolInfo[_pid];
         pool.masterchefControlled = _masterchefControlled;
     }
 
+    /**
+     * @notice 开关某池是否由 MasterchefV2 自动控速（仅 owner）。
+     * @dev false 时外部自行调 StakingRewards.setRewardRate；true 时由 alloc 与投票驱动。
+     */
     function setIsMasterchefControlled(uint256 _pid, bool _masterchefControlled) external onlyOwner {
-        // 使用场景：把某池交给“外部脚本/其它合约”控制 rewardRate 时置 false；恢复由 MasterchefV2 按权重自动控速时置 true。
         _setIsMasterchefControlled(_pid, _masterchefControlled);
     }
 
+    /**
+     * @notice 批量开关多池是否由 MasterchefV2 控速（仅 owner）。
+     */
     function setIsMasterchefControlledBulk(uint256[] memory _pids, bool[] memory _masterchefControlled) public onlyOwner {
-        // 使用场景：批量切换多个池是否由 MasterchefV2 控速（例如升级一批池子的控制策略）。
         uint256 length = _pids.length;
         for (uint256 pid = 0; pid < length; ++pid) {
             _setIsMasterchefControlled(_pids[pid], _masterchefControlled[pid]);
         }
     }
 
+    /**
+     * @dev 设置某池质押余额是否计入投票权（须 stakingFarm 实现 balanceOf）。
+     */
     function _setCountDepositAmountAsVotingPower(uint256 _pid, bool _countAsVotingPower) internal {
         PoolInfo storage pool = poolInfo[_pid];
         pool.countDepositAmountAsVotingPower = _countAsVotingPower;
     }
 
+    /**
+     * @notice 开关「某池内质押的 xBASE 是否计票」（仅 owner）。
+     * @dev 开启后 `getTotalVotePower` 会对该池 `stakingFarm.balanceOf` 外部调用。
+     */
     function setCountDepositAmountAsVotingPower(uint256 _pid, bool _countAsVotingPower) public onlyOwner {
-        // 使用场景：允许“把某池里质押的 xBASE 也算投票权”，避免用户必须把 xBASE 放在钱包里才能投票。
-        // 风险提示：开启后 getTotalVotePower 会对该池 stakingFarm 调 balanceOf(user)，对实现方有假设。
         _setCountDepositAmountAsVotingPower(_pid, _countAsVotingPower);
     }
 
+    /**
+     * @notice 批量开关多池的存款计票（仅 owner）。
+     */
     function setCountDepositAmountAsVotingPowerBulk(uint256[] memory _pids, bool[] memory _countAsVotingPower) public onlyOwner {
-        // 使用场景：批量开启/关闭多个池的“存款计票”开关。
         uint256 length = _pids.length;
         for (uint256 pid = 0; pid < length; ++pid) {
             _setCountDepositAmountAsVotingPower(_pids[pid], _countAsVotingPower[pid]);
         }
     }
 
+    /**
+     * @notice 设置全局基础每秒排放计量（仅 owner）；改后建议 `massUpdatePools`。
+     * @param _globalSkullPerSecond 新的 `globalSkullPerSecond`。
+     */
     function setGlobalSkullPerSecond(uint256 _globalSkullPerSecond) public onlyOwner {
-        // 使用场景：协议整体调整基础 emissions（例如减半日、活动加速期）。改完通常需要调用 massUpdatePools 推送到各池。
         globalSkullPerSecond = _globalSkullPerSecond;
     }
 
+    /**
+     * @notice 设置全局社区投票每秒排放计量（仅 owner）；改后建议 `massUpdatePools`。
+     * @param _globalCommunitySkullPerSecond 新的 `globalCommunitySkullPerSecond`。
+     */
     function setGlobalCommunitySkullPerSecond(uint256 _globalCommunitySkullPerSecond) public onlyOwner {
-        // 使用场景：协议整体调整“社区投票加成盘子”的 emissions（例如投票激励期/投票暂停期）。
         globalCommunitySkullPerSecond = _globalCommunitySkullPerSecond;
     }
 }

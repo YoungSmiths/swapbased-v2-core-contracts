@@ -90,7 +90,7 @@ interface IBaseToken {
      */
     function mint(address recipient_, uint256 amount_) external returns (bool);
 }
-
+ 
 /**
  * @title StakingRewardsFactory —— 多矿池「总厨」
  * @notice **简化版**挖矿调度：每个质押币种（多为 LP）对应 **一份** 已部署的 `StakingRewards`；全协议共用一个 `rewardsToken`，通过 `mint` 发奖。
